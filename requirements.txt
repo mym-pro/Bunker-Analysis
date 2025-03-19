@@ -1,0 +1,7 @@
+streamlit
+pandas
+pymupdf
+PyGithub
+openpyxl
+plotly
+requests
