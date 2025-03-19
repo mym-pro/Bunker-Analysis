@@ -16,7 +16,6 @@ from github import Github
 import base64
 from io import BytesIO
 
-
 # --------------------------
 # 配置日志系统
 # --------------------------
@@ -41,7 +40,6 @@ REGION_PORTS = {
 
 COMPARE_PORTS = ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"]
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
-
 
 class BunkerDataProcessor:
     """数据处理工具类"""
@@ -124,20 +122,15 @@ class GitHubDataManager:
         except Exception as e:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
-BUNKER_PATH = "data/bunker_prices.xlsx"
-FUEL_PATH = "data/fuel_prices.xlsx"
+
 class EnhancedBunkerPriceExtractor:
     """增强版PDF数据提取器"""
     
-    def __init__(self, pdf_path: str):
+    def __init__(self, pdf_path: str, bunker_path: str, fuel_path: str):
         """移除本地路径依赖"""
         self.pdf_path = pdf_path
-
-    def _validate_paths(self):
-        """路径验证"""
-        for path in [self.bunker_path, self.fuel_path]:
-            if not isinstance(path, Path):
-                raise ValueError(f"无效路径格式: {path} 必须为Path对象")
+        self.bunker_path = bunker_path
+        self.fuel_path = fuel_path
 
     def process_pdf(self) -> Dict[str, int]:
         """
@@ -290,7 +283,6 @@ class EnhancedBunkerPriceExtractor:
             max(coords['start_y'], coords['end_y'])
         )
         return page.get_text("text", clip=rect)
-
     def _extract_date(self, text: str) -> Optional[datetime.date]:
         """从文本中提取日期"""
         date_pattern = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
@@ -310,7 +302,8 @@ class EnhancedBunkerPriceExtractor:
             
             # 初始化GitHub管理器
             gh_manager = GitHubDataManager(github_token, repo_name)
-        # 添加列对齐逻辑
+            
+            # 读取现有数据
             existing_df, exists = gh_manager.read_excel(output_path)
             if exists and not existing_df.empty:
                 # 处理列不一致问题
@@ -321,16 +314,15 @@ class EnhancedBunkerPriceExtractor:
             else:
                 combined_df = new_df
                 
-                # 保存数据
-                return gh_manager.save_excel(
-                    combined_df,
-                    output_path,
-                    f"Update {sheet_name} at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                )
+            # 保存数据
+            return gh_manager.save_excel(
+                combined_df,
+                output_path,
+                f"Update {sheet_name} at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
         except Exception as e:
             logger.error(f"保存失败: {str(e)}")
             return False
-
 
 # --------------------------
 # Streamlit界面组件
@@ -379,6 +371,7 @@ def on_download_click(success: bool, filename: str):
         st.toast(f"✅ {filename} 下载已开始，请查看浏览器下载列表")
     else:
         st.toast(f"⚠️ 下载文件为空，未生成下载", icon="⚠️")
+
 def main_ui():
     """主界面布局"""
     st.set_page_config(page_title="船燃价格分析系统", layout="wide")
@@ -429,7 +422,7 @@ def main_ui():
                         pdf_path = tmp.name
 
                     # 处理PDF
-                    extractor = EnhancedBunkerPriceExtractor(pdf_path, [bunker_path, fuel_path])
+                    extractor = EnhancedBunkerPriceExtractor(pdf_path, BUNKER_PATH, FUEL_PATH)
                     result = extractor.process_pdf()
                     
                     # 记录处理结果
@@ -443,31 +436,6 @@ def main_ui():
 
                     # 清理临时文件
                     os.unlink(pdf_path)
-                except Exception as e:
-                    # 添加详细错误日志
-                    logger.error(f"文件处理错误详情: {traceback.format_exc()}")
-                    error_messages.append(f"❌ {file.name} 处理失败: {str(e)}（详细日志请查看控制台）")
-                    # 创建临时PDF文件
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(file.getbuffer())
-                        pdf_path = tmp.name
-
-                    # 处理PDF
-                    extractor = EnhancedBunkerPriceExtractor(pdf_path, [bunker_path, fuel_path])
-                    result = extractor.process_pdf()
-                    
-                    # 记录处理结果
-                    if result['bunker'] > 0 or result['fuel'] > 0:
-                        st.session_state.processed_files.add(file.name)
-                        total_added['bunker'] += result['bunker']
-                        total_added['fuel'] += result['fuel']
-                        st.toast(f"✅ {file.name} 处理成功（+{result['bunker']}油价/+{result['fuel']}燃料）")
-                    else:
-                        st.toast(f"⚠️ {file.name} 无新数据（可能为重复文件）")
-
-                    # 清理临时文件
-                    os.unlink(pdf_path)
-
                 except Exception as e:
                     error_messages.append(f"❌ {file.name} 处理失败: {str(e)}")
                     logger.error(f"文件处理错误: {file.name} - {str(e)}")
@@ -501,8 +469,8 @@ def main_ui():
     # --------------------------
     # 数据分析模块
     # --------------------------
-    bunker_df = load_history_data(bunker_path)
-    fuel_df = load_history_data(fuel_path)
+    bunker_df = load_history_data(BUNKER_PATH)
+    fuel_df = load_history_data(FUEL_PATH)
 
     with st.expander("📈 第二步 - 数据分析", expanded=True):
         tab1, tab2, tab3, tab4 = st.tabs(["港口油价信息", "油价趋势分析", "燃料价格分析", "数据对比"])
@@ -642,33 +610,29 @@ def main_ui():
         st.subheader("完整数据下载")
         col1, col2 = st.columns(2)
         with col1:
-            if bunker_path.exists():
-                try:
-                    data = generate_excel_download(bunker_df)
-                    st.download_button(
-                        label="下载完整油价数据",
-                        data=data,
-                        file_name="bunker_prices_full.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        on_click=lambda: on_download_click(True, "油价数据")
-                    )
-                except ValueError:
-                    st.warning("油价数据为空，无法下载")
-                    on_download_click(False, "")
+            if bunker_df.empty:
+                st.warning("油价数据为空，无法下载")
+            else:
+                data = generate_excel_download(bunker_df)
+                st.download_button(
+                    label="下载完整油价数据",
+                    data=data,
+                    file_name="bunker_prices_full.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    on_click=lambda: on_download_click(True, "油价数据")
+                )
         with col2:
-            if fuel_path.exists():
-                try:
-                    data = generate_excel_download(fuel_df)
-                    st.download_button(
-                        label="下载完整燃料数据",
-                        data=data,
-                        file_name="fuel_prices_full.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        on_click=lambda: on_download_click(True, "燃料数据")
-                    )
-                except ValueError:
-                    st.warning("燃料数据为空，无法下载")
-                    on_download_click(False, "")
+            if fuel_df.empty:
+                st.warning("燃料数据为空，无法下载")
+            else:
+                data = generate_excel_download(fuel_df)
+                st.download_button(
+                    label="下载完整燃料数据",
+                    data=data,
+                    file_name="fuel_prices_full.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    on_click=lambda: on_download_click(True, "燃料数据")
+                )
 
         st.subheader("单日数据下载")
         col1, col2 = st.columns(2)
@@ -680,7 +644,9 @@ def main_ui():
                 )
                 if selected_bunker_date:
                     daily_bunker = bunker_df[bunker_df['Date'].astype(str) == selected_bunker_date]
-                    try:
+                    if daily_bunker.empty:
+                        st.warning("当日油价数据为空，无法下载")
+                    else:
                         data = generate_excel_download(daily_bunker)
                         st.download_button(
                             label="下载当日油价数据",
@@ -689,9 +655,6 @@ def main_ui():
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             on_click=lambda: on_download_click(True, f"当日油价数据 ({selected_bunker_date})")
                         )
-                    except ValueError:
-                        st.warning("当日油价数据为空，无法下载")
-                        on_download_click(False, "")
         with col2:
             if not fuel_df.empty:
                 selected_fuel_date = st.selectbox(
@@ -700,7 +663,9 @@ def main_ui():
                 )
                 if selected_fuel_date:
                     daily_fuel = fuel_df[fuel_df['Date'].astype(str) == selected_fuel_date]
-                    try:
+                    if daily_fuel.empty:
+                        st.warning("当日燃料数据为空，无法下载")
+                    else:
                         data = generate_excel_download(daily_fuel)
                         st.download_button(
                             label="下载当日燃料数据",
@@ -709,9 +674,6 @@ def main_ui():
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             on_click=lambda: on_download_click(True, f"当日燃料数据 ({selected_fuel_date})")
                         )
-                    except ValueError:
-                        st.warning("当日燃料数据为空，无法下载")
-                        on_download_click(False, "")
 
 if __name__ == "__main__":
-    main_ui()  
+    main_ui()
