@@ -303,23 +303,30 @@ class EnhancedBunkerPriceExtractor:
             return None
 
     def _save_data(self, new_df: pd.DataFrame, output_path: str, sheet_name: str) -> bool:
-        # 添加列对齐逻辑
-        existing_df, exists = gh_manager.read_excel(output_path)
-        if exists and not existing_df.empty:
-            # 处理列不一致问题
-            all_columns = list(set(existing_df.columns) | set(new_df.columns))
-            existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
-            new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
-            combined_df = pd.concat([existing_df, new_df])
-        else:
-            combined_df = new_df
+        try:
+            # 从Streamlit secrets获取配置
+            github_token = st.secrets.github.token
+            repo_name = st.secrets.github.repo
             
-            # 保存数据
-            return gh_manager.save_excel(
-                combined_df,
-                output_path,
-                f"Update {sheet_name} at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            )
+            # 初始化GitHub管理器
+            gh_manager = GitHubDataManager(github_token, repo_name)
+        # 添加列对齐逻辑
+            existing_df, exists = gh_manager.read_excel(output_path)
+            if exists and not existing_df.empty:
+                # 处理列不一致问题
+                all_columns = list(set(existing_df.columns) | set(new_df.columns))
+                existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
+                new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
+                combined_df = pd.concat([existing_df, new_df])
+            else:
+                combined_df = new_df
+                
+                # 保存数据
+                return gh_manager.save_excel(
+                    combined_df,
+                    output_path,
+                    f"Update {sheet_name} at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )
         except Exception as e:
             logger.error(f"保存失败: {str(e)}")
             return False
