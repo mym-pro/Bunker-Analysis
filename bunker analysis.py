@@ -99,13 +99,13 @@ class GitHubDataManager:
         self.g = Github(self.token)
         self.repo = self.g.get_repo(self.repo_name)
     
-    def read_excel(self, file_path: str) -> pd.DataFrame:
-        """从GitHub读取Excel文件"""
+    def read_excel(self, file_path: str) -> Tuple[pd.DataFrame, bool]:
+        """修复返回值问题"""
         try:
             contents = self.repo.get_contents(file_path)
-            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), True)
+            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), sheet_name=0), True
         except Exception as e:
-            return pd.DataFrame(), False
+            return pd.DataFrame(), False  # 明确返回元组
     
     def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
         """保存Excel文件到GitHub"""
@@ -124,19 +124,14 @@ class GitHubDataManager:
         except Exception as e:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
-
+BUNKER_PATH = "data/bunker_prices.xlsx"
+FUEL_PATH = "data/fuel_prices.xlsx"
 class EnhancedBunkerPriceExtractor:
     """增强版PDF数据提取器"""
     
-    def __init__(self, pdf_path: str, output_paths: List[Path]):
-        """
-        初始化参数：
-        - pdf_path: PDF文件路径
-        - output_paths: 输出文件路径列表 [油价数据路径, 燃料数据路径]
-        """
+    def __init__(self, pdf_path: str):
+        """移除本地路径依赖"""
         self.pdf_path = pdf_path
-        self.bunker_path, self.fuel_path = output_paths
-        self._validate_paths()
 
     def _validate_paths(self):
         """路径验证"""
@@ -308,21 +303,16 @@ class EnhancedBunkerPriceExtractor:
             return None
 
     def _save_data(self, new_df: pd.DataFrame, output_path: str, sheet_name: str) -> bool:
-        """修改后的保存方法"""
-        try:
-            # 从Streamlit secrets获取配置
-            github_token = st.secrets.github.token
-            repo_name = st.secrets.github.repo
-            
-            # 初始化GitHub管理器
-            gh_manager = GitHubDataManager(github_token, repo_name)
-            
-            # 读取现有数据
-            existing_df, exists = gh_manager.read_excel(output_path)
-            if exists:
-                combined_df = pd.concat([existing_df, new_df]).drop_duplicates()
-            else:
-                combined_df = new_df
+        # 添加列对齐逻辑
+        existing_df, exists = gh_manager.read_excel(output_path)
+        if exists and not existing_df.empty:
+            # 处理列不一致问题
+            all_columns = list(set(existing_df.columns) | set(new_df.columns))
+            existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
+            new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
+            combined_df = pd.concat([existing_df, new_df])
+        else:
+            combined_df = new_df
             
             # 保存数据
             return gh_manager.save_excel(
@@ -388,10 +378,8 @@ def main_ui():
     st.title(" Mariners' Bunker Price Analysis System ")
 
     # 初始化数据存储路径
-    history_dir = Path("history_data")
-    history_dir.mkdir(parents=True, exist_ok=True)
-    bunker_path = history_dir / "bunker_prices.xlsx"
-    fuel_path = history_dir / "fuel_prices.xlsx"
+    BUNKER_PATH = "data/bunker_prices.xlsx"
+    FUEL_PATH = "data/fuel_prices.xlsx"
 
     # 初始化session状态
     if 'processed_files' not in st.session_state:
@@ -423,11 +411,11 @@ def main_ui():
         with st.status("正在解析文件...", expanded=True) as status:
             for file in new_files:
                 try:
-                    # 检查文件类型
-                    if file.type != "application/pdf":
-                        error_messages.append(f"❌ 文件类型错误: {file.name}（非PDF文件）")
-                        continue
-
+                    # ...原有代码...
+                except Exception as e:
+                    # 添加详细错误日志
+                    logger.error(f"文件处理错误详情: {traceback.format_exc()}")
+                    error_messages.append(f"❌ {file.name} 处理失败: {str(e)}（详细日志请查看控制台）")
                     # 创建临时PDF文件
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(file.getbuffer())
