@@ -418,7 +418,31 @@ def main_ui():
         with st.status("正在解析文件...", expanded=True) as status:
             for file in new_files:
                 try:
-                    # ...原有代码...
+                    # 检查文件类型
+                    if file.type != "application/pdf":
+                        error_messages.append(f"❌ 文件类型错误: {file.name}（非PDF文件）")
+                        continue
+
+                    # 创建临时PDF文件
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(file.getbuffer())
+                        pdf_path = tmp.name
+
+                    # 处理PDF
+                    extractor = EnhancedBunkerPriceExtractor(pdf_path, [bunker_path, fuel_path])
+                    result = extractor.process_pdf()
+                    
+                    # 记录处理结果
+                    if result['bunker'] > 0 or result['fuel'] > 0:
+                        st.session_state.processed_files.add(file.name)
+                        total_added['bunker'] += result['bunker']
+                        total_added['fuel'] += result['fuel']
+                        st.toast(f"✅ {file.name} 处理成功（+{result['bunker']}油价/+{result['fuel']}燃料）")
+                    else:
+                        st.toast(f"⚠️ {file.name} 无新数据（可能为重复文件）")
+
+                    # 清理临时文件
+                    os.unlink(pdf_path)
                 except Exception as e:
                     # 添加详细错误日志
                     logger.error(f"文件处理错误详情: {traceback.format_exc()}")
