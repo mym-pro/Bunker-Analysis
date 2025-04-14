@@ -74,21 +74,20 @@ class BunkerDataProcessor:
 
     @staticmethod
     def merge_data(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
-        """
-        数据合并逻辑：
-        1. 合并时自动去重
-        2. 返回是否有新增数据的标志
-        """
+        """增强版数据合并逻辑"""
         if existing_df.empty:
-            return new_df, True
-            
-        existing_dates = set(existing_df['Date'])
-        new_data = new_df[~new_df['Date'].isin(existing_dates)]
+            return new_df.drop_duplicates(subset='Date', keep='last'), True
+
+        # 统一日期格式为datetime.date类型
+        existing_df['Date'] = pd.to_datetime(existing_df['Date']).dt.date
+        new_df['Date'] = pd.to_datetime(new_df['Date']).dt.date
+
+        # 合并时保留最新数据
+        combined = pd.concat([existing_df, new_df])
+        combined = combined.sort_values('Date', ascending=False)
+        combined = combined.drop_duplicates(subset='Date', keep='first')  # 保留最新数据
         
-        if new_data.empty:
-            return existing_df, False
-            
-        return pd.concat([existing_df, new_data]).drop_duplicates().sort_values('Date').reset_index(drop=True), True
+        return combined.sort_values('Date', ascending=True).reset_index(drop=True), True
 
 class GitHubDataManager:
     def __init__(self, token: str, repo_name: str):
@@ -478,20 +477,20 @@ def main_ui():
         with tab1:
             if not bunker_df.empty:
                 st.subheader("近期油价趋势（最近10个记录）")
-                recent_data = bunker_df.head(10).copy()  # 使用.copy()确保独立操作
-                recent_data['Date'] = recent_data['Date'].astype(str)  # 转换日期列为字符串格式
+                # 按日期升序排列，确保最新日期在下方
+                recent_data = bunker_df.sort_values('Date', ascending=True).tail(10).copy()
                 
                 for region, ports in REGION_PORTS.items():
                     st.subheader(f"🏙️ {region}")
-                    region_cols = [col for col in recent_data.columns if col in ports]
+                    # 按预设顺序筛选存在的列
+                    region_cols = [col for col in ports if col in recent_data.columns]
+                    ordered_df = recent_data[["Date"] + region_cols]
                     st.dataframe(
-                        recent_data[["Date"] + region_cols].set_index("Date"),
+                        ordered_df.set_index("Date"),
                         use_container_width=True,
                         height=300,
                         hide_index=False
                     )
-            else:
-                st.warning("暂无油价数据可供分析。")
 
         with tab2:
             if not bunker_df.empty:
@@ -537,30 +536,26 @@ def main_ui():
         with tab3:
             if not fuel_df.empty:
                 st.subheader("替代燃料价格趋势")
+                # 固定列顺序：MLBSO00在前
+                fuel_cols = ['Date'] + [col for col in FUEL_TYPES if col in fuel_df.columns]
+                ordered_fuel_df = fuel_df[fuel_cols]
+                
                 st.dataframe(
-                    fuel_df.head(10).set_index("Date"),
+                    ordered_fuel_df.head(10).set_index("Date"),
                     use_container_width=True
                 )
+                
                 fig = go.Figure()
+                # 按固定顺序添加轨迹
                 for fuel_type in FUEL_TYPES:
-                    fig.add_trace(go.Scatter(
-                        x=fuel_df['Date'],
-                        y=fuel_df[fuel_type],
-                        name=fuel_type,
-                        mode='lines+markers',
-                        connectgaps=True
-                    ))
-                fig.update_layout(
-                    height=600,
-                    template="plotly_white",
-                    yaxis_title="价格 (USD/吨)",
-                    xaxis_title="日期",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    hovermode="x unified"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("暂无燃料价格数据。")
+                    if fuel_type in fuel_df.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fuel_df['Date'],
+                            y=fuel_df[fuel_type],
+                            name=fuel_type,
+                            mode='lines+markers',
+                            connectgaps=True
+                        ))
 
         with tab4:
             if not bunker_df.empty:
@@ -676,4 +671,4 @@ def main_ui():
                         )
 
 if __name__ == "__main__":
-    main_ui()
+    main_ui() 
