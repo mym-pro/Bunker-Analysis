@@ -533,7 +533,7 @@ def main_ui():
                 ordered_fuel_df = fuel_df[fuel_cols]
                 
                 st.dataframe(
-                    ordered_fuel_df.sort_values('Date', ascending=True).head(10).set_index("Date"),
+                    ordered_fuel_df.sort_values('Date', ascending=True).tail(10).set_index("Date"),
                     use_container_width=True
                 )
                 
