@@ -548,6 +548,7 @@ def main_ui():
                             mode='lines+markers',
                             connectgaps=True
                         ))
+                st.plotly_chart(fig, use_container_width=True)
 
         with tab4:
             if not bunker_df.empty:
