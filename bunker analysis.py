@@ -400,7 +400,11 @@ def main_ui():
                     repo_name = st.secrets.github.repo
                     gh_manager = GitHubDataManager(github_token, repo_name)
                     
+                    # 原status内的代码
+                    progress_bar = st.progress(0)
+                    
                     # 处理油价数据
+                    progress_bar.progress(30)
                     bunker_clean_count = 0
                     bunker_df, exists = gh_manager.read_excel(BUNKER_PATH)
                     if exists:
@@ -411,6 +415,7 @@ def main_ui():
                         gh_manager.save_excel(cleaned_bunker, BUNKER_PATH, "强制清理历史油价数据")
                     
                     # 处理燃料数据
+                    progress_bar.progress(70)
                     fuel_clean_count = 0
                     fuel_df, exists = gh_manager.read_excel(FUEL_PATH)
                     if exists:
@@ -420,20 +425,13 @@ def main_ui():
                         fuel_clean_count = original_rows - new_rows
                         gh_manager.save_excel(cleaned_fuel, FUEL_PATH, "强制清理历史燃料数据")
                     
-                    # 显示清理结果
-                    status.update(
-                        label=f"清理完成！移除{bunker_clean_count}条油价记录/{fuel_clean_count}条燃料记录",
-                        state="complete",
-                        expanded=False
-                    )
+                    progress_bar.progress(100)
+                    st.success(f"清理完成！移除{bunker_clean_count}条油价记录/{fuel_clean_count}条燃料记录")
                     st.toast("✅ 数据标准化完成，缓存已刷新！")
-                    st.cache_data.clear()  # 清除所有缓存
-                    
+                    st.cache_data.clear()
                 except Exception as e:
-                    status.update(label="❌ 清理过程中发生错误", state="error")
-                    st.error(f"错误详情：{str(e)}")
+                    st.error(f"❌ 清理过程中发生错误: {str(e)}")
                     logger.error(f"数据清理失败: {str(e)}")
-    
 
     # 只处理新上传的文件
     new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
