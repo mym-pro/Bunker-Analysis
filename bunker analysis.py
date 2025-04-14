@@ -302,8 +302,12 @@ class EnhancedBunkerPriceExtractor:
                 existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
                 new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
                 combined_df = pd.concat([existing_df, new_df])
+                combined_df = BunkerDataProcessor.clean_dataframe(combined_df)
             else:
-                combined_df = new_df
+                combined_df = BunkerDataProcessor.clean_dataframe(new_df)
+            # 按REGION_PORTS的顺序排列列
+            ordered_columns = ['Date'] + [port for region in REGION_PORTS.values() for port in region if port in combined_df.columns]
+            combined_df = combined_df[ordered_columns]
                 
             # 保存数据
             return gh_manager.save_excel(
