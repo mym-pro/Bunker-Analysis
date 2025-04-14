@@ -601,6 +601,7 @@ def main_ui():
             if bunker_df.empty:
                 st.warning("油价数据为空，无法下载")
             else:
+                bunker_df = bunker_df[['Date'] + [col for col in bunker_df.columns if col != 'Date']]
                 data = generate_excel_download(bunker_df)
                 st.download_button(
                     label="下载完整油价数据",
