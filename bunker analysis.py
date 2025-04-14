@@ -388,50 +388,6 @@ def main_ui():
             accept_multiple_files=True,
             help="请上传最新版的Bunkerwire PDF文件"
         )
-        # 新增历史数据清理按钮 -------------------------------------------------
-        st.markdown("---")
-        if st.button("🔥 强制清理历史数据（去重并标准化格式）", 
-                    help="⚠️ 该操作将永久修改存储库数据，建议仅在数据混乱时使用！",
-                    type="secondary"):
-            with st.status("正在进行数据大扫除...", expanded=True) as status:
-                try:
-                    # 初始化GitHub管理器
-                    github_token = st.secrets.github.token
-                    repo_name = st.secrets.github.repo
-                    gh_manager = GitHubDataManager(github_token, repo_name)
-                    
-                    # 原status内的代码
-                    progress_bar = st.progress(0)
-                    
-                    # 处理油价数据
-                    progress_bar.progress(30)
-                    bunker_clean_count = 0
-                    bunker_df, exists = gh_manager.read_excel(BUNKER_PATH)
-                    if exists:
-                        original_rows = len(bunker_df)
-                        cleaned_bunker = BunkerDataProcessor.clean_dataframe(bunker_df)
-                        new_rows = len(cleaned_bunker)
-                        bunker_clean_count = original_rows - new_rows
-                        gh_manager.save_excel(cleaned_bunker, BUNKER_PATH, "强制清理历史油价数据")
-                    
-                    # 处理燃料数据
-                    progress_bar.progress(70)
-                    fuel_clean_count = 0
-                    fuel_df, exists = gh_manager.read_excel(FUEL_PATH)
-                    if exists:
-                        original_rows = len(fuel_df)
-                        cleaned_fuel = BunkerDataProcessor.clean_dataframe(fuel_df)
-                        new_rows = len(cleaned_fuel)
-                        fuel_clean_count = original_rows - new_rows
-                        gh_manager.save_excel(cleaned_fuel, FUEL_PATH, "强制清理历史燃料数据")
-                    
-                    progress_bar.progress(100)
-                    st.success(f"清理完成！移除{bunker_clean_count}条油价记录/{fuel_clean_count}条燃料记录")
-                    st.toast("✅ 数据标准化完成，缓存已刷新！")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"❌ 清理过程中发生错误: {str(e)}")
-                    logger.error(f"数据清理失败: {str(e)}")
 
     # 只处理新上传的文件
     new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
