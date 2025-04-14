@@ -43,51 +43,43 @@ FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
 class BunkerDataProcessor:
     """数据处理工具类"""
-    
     @staticmethod
     def format_date(date_series: pd.Series) -> pd.Series:
-        """统一日期格式为YYYY-MM-DD"""
+        """强制统一日期格式"""
         return pd.to_datetime(date_series, errors='coerce').dt.date
 
     @staticmethod
     def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        数据清洗：
-        1. 转换数值列
-        2. 去除全为空值的列
-        3. 处理异常值
-        """
-        # 替换NA并去除全空列
-        df = df.replace('NA', pd.NA).dropna(how='all', axis=1)
-        
-        # 数值类型转换
-        for col in df.columns:
-            if col != 'Date':
-                df.loc[:, col] = pd.to_numeric(df[col], errors='coerce') # 非数值转为NaN
-                
-        # 去除日期列中的无效日期
+        """增强清洗逻辑"""
+        # 统一日期格式
         if 'Date' in df.columns:
             df['Date'] = BunkerDataProcessor.format_date(df['Date'])
             df = df.dropna(subset=['Date'])
+        
+        # 去除完全重复行
+        df = df.drop_duplicates()
+        
+        # 按日期排序并去重（保留最新数据）
+        if not df.empty:
+            df = df.sort_values('Date', ascending=False)
+            df = df.drop_duplicates(subset='Date', keep='first')
+            df = df.sort_values('Date', ascending=True)
             
-        return df.dropna(how='all', axis=1)
+        return df.reset_index(drop=True)
 
     @staticmethod
     def merge_data(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
-        """增强版数据合并逻辑"""
-        if existing_df.empty:
-            return new_df.drop_duplicates(subset='Date', keep='last'), True
-
-        # 统一日期格式为datetime.date类型
-        existing_df['Date'] = pd.to_datetime(existing_df['Date']).dt.date
-        new_df['Date'] = pd.to_datetime(new_df['Date']).dt.date
-
-        # 合并时保留最新数据
-        combined = pd.concat([existing_df, new_df])
-        combined = combined.sort_values('Date', ascending=False)
-        combined = combined.drop_duplicates(subset='Date', keep='first')  # 保留最新数据
+        """增强合并逻辑"""
+        # 清洗历史数据
+        existing_df = BunkerDataProcessor.clean_dataframe(existing_df)
+        new_df = BunkerDataProcessor.clean_dataframe(new_df)
         
-        return combined.sort_values('Date', ascending=True).reset_index(drop=True), True
+        if existing_df.empty:
+            return new_df, True
+            
+        # 合并并保留最新数据
+        combined = pd.concat([existing_df, new_df])
+        return BunkerDataProcessor.clean_dataframe(combined), True
 
 class GitHubDataManager:
     def __init__(self, token: str, repo_name: str):
@@ -328,7 +320,7 @@ class EnhancedBunkerPriceExtractor:
 # --------------------------
 @st.cache_data(ttl=3600, show_spinner="加载历史数据...")
 def load_history_data(path: str) -> pd.DataFrame:
-    """修改后的数据加载函数"""
+    """增强版数据加载"""
     try:
         github_token = st.secrets.github.token
         repo_name = st.secrets.github.repo
@@ -336,8 +328,8 @@ def load_history_data(path: str) -> pd.DataFrame:
         
         df, exists = gh_manager.read_excel(path)
         if exists:
-            df['Date'] = BunkerDataProcessor.format_date(df['Date'])
-            return df.sort_values('Date', ascending=False).reset_index(drop=True)
+            processed_df = BunkerDataProcessor.clean_dataframe(df)
+            return processed_df.sort_values('Date', ascending=True)  # 按日期升序排列
         return pd.DataFrame()
     except Exception as e:
         logger.error(f"数据加载失败: {path} - {str(e)}")
@@ -477,7 +469,7 @@ def main_ui():
         with tab1:
             if not bunker_df.empty:
                 st.subheader("近期油价趋势（最近10个记录）")
-                # 按日期升序排列，确保最新日期在下方
+                # 按日期升序显示，确保最新在下方
                 recent_data = bunker_df.sort_values('Date', ascending=True).tail(10).copy()
                 
                 for region, ports in REGION_PORTS.items():
@@ -541,7 +533,7 @@ def main_ui():
                 ordered_fuel_df = fuel_df[fuel_cols]
                 
                 st.dataframe(
-                    ordered_fuel_df.head(10).set_index("Date"),
+                    ordered_fuel_df.sort_values('Date', ascending=False).head(10).set_index("Date"),
                     use_container_width=True
                 )
                 
@@ -671,4 +663,4 @@ def main_ui():
                         )
 
 if __name__ == "__main__":
-    main_ui() 
+    main_ui()
