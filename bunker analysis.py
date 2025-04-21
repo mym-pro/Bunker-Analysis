@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz
+import fitz  # PyMuPDF
 import pandas as pd
 import os
 import re
@@ -342,6 +342,8 @@ def main():
                         use_container_width=True,
                         height=300
                     )
+            else:
+                st.warning("暂无油价数据可供分析。")
 
         with tab2:
             if not bunker_df.empty:
@@ -418,6 +420,8 @@ def main():
                     hovermode="x unified"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("暂无燃料价格数据。")
 
         with tab4:
             st.subheader("指定日期港口价格对比")
