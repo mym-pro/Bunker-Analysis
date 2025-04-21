@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 import pandas as pd
 import os
 import re
@@ -11,20 +11,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
-from github import Github
-import base64
-from io import BytesIO
 
-# --------------------------
-# 配置日志系统
-# --------------------------
+# 配置日志
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --------------------------
 # 常量定义
-# --------------------------
 REGION_PORTS = {
     "Asia Pacific/Middle East": ["Singapore", "Fujairah", "Japan", "West Japan", "South Korea", 
                                  "South Korea (West)", "Hong Kong", "Shanghai", "Zhoushan", 
@@ -41,483 +33,336 @@ REGION_PORTS = {
 COMPARE_PORTS = ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"]
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
-class BunkerDataProcessor:
-    """数据处理工具类"""
-    @staticmethod
-    def format_date(date_series: pd.Series) -> pd.Series:
-        """强制统一日期格式"""
-        return pd.to_datetime(date_series, errors='coerce').dt.date
+# 辅助函数
+def format_date(date_series):
+    """将日期列格式化为 YYYY-MM-DD"""
+    return pd.to_datetime(date_series).dt.date
 
-    @staticmethod
-    def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """增强清洗逻辑"""
-        # 统一日期格式
-        if 'Date' in df.columns:
-            df['Date'] = BunkerDataProcessor.format_date(df['Date'])
-            df = df.dropna(subset=['Date'])
-        
-        # 去除完全重复行
-        df = df.drop_duplicates()
-        
-        # 按日期排序并去重（保留最新数据）
-        if not df.empty:
-            df = df.sort_values('Date', ascending=False)
-            df = df.drop_duplicates(subset='Date', keep='first')
-            df = df.sort_values('Date', ascending=True)
-            
-        return df.reset_index(drop=True)
 
-    @staticmethod
-    def merge_data(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
-        """增强合并逻辑"""
-        # 清洗历史数据
-        existing_df = BunkerDataProcessor.clean_dataframe(existing_df)
-        new_df = BunkerDataProcessor.clean_dataframe(new_df)
-        
-        if existing_df.empty:
-            return new_df, True
-            
-        # 合并并保留最新数据
-        combined = pd.concat([existing_df, new_df])
-        return BunkerDataProcessor.clean_dataframe(combined), True
+def clean_dataframe(df):
+    """清洗数据：转换数值列，去除全为空的列"""
+    df = df.replace('NA', pd.NA).dropna(how='all', axis=1)
+    for col in df.columns:
+        if col != 'Date':
+            df[col] = pd.to_numeric(df[col], errors='coerce')  # 将无法转换的值设为 NaN
+    return df
 
-class GitHubDataManager:
-    def __init__(self, token: str, repo_name: str):
-        self.token = token
-        self.repo_name = repo_name
-        self.g = Github(self.token)
-        self.repo = self.g.get_repo(self.repo_name)
-    
-    def read_excel(self, file_path: str) -> Tuple[pd.DataFrame, bool]:
-        """修复返回值问题"""
-        try:
-            contents = self.repo.get_contents(file_path)
-            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), sheet_name=0), True
-        except Exception as e:
-            return pd.DataFrame(), False  # 明确返回元组
-    
-    def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
-        """保存Excel文件到GitHub"""
-        try:
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            content = output.getvalue()
-            
-            try:
-                contents = self.repo.get_contents(file_path)
-                self.repo.update_file(contents.path, commit_msg, content, contents.sha)
-            except:
-                self.repo.create_file(file_path, commit_msg, content)
-            return True
-        except Exception as e:
-            logger.error(f"GitHub保存失败: {str(e)}")
-            return False
+
+def merge_and_sort_data(existing_df, new_df):
+    """合并现有数据和新数据，并按日期排序"""
+    existing_dates = set(existing_df['Date'])
+    new_data = new_df[~new_df['Date'].isin(existing_dates)]
+    if new_data.empty:
+        return existing_df, False
+    combined_df = pd.concat([existing_df, new_data]).drop_duplicates()
+    return combined_df.sort_values('Date').reset_index(drop=True), True
+
 
 class EnhancedBunkerPriceExtractor:
-    """增强版PDF数据提取器"""
-    
-    def __init__(self, pdf_path: str, bunker_path: str, fuel_path: str):
-        """移除本地路径依赖"""
+    def __init__(self, pdf_path, output_excel_paths):
         self.pdf_path = pdf_path
-        self.bunker_path = bunker_path
-        self.fuel_path = fuel_path
+        self.output_excel_paths = output_excel_paths
+        self.logger = logger
+        self._validate_paths()
 
-    def process_pdf(self) -> Dict[str, int]:
-        """
-        主处理方法：
-        返回包含新增数据数量的字典 {'bunker': 新增油价条目数, 'fuel': 新增燃料条目数}
-        """
+    def _validate_paths(self):
+        """路径验证"""
+        for path in self.output_excel_paths:
+            if not isinstance(path, Path):
+                raise ValueError(f"无效路径格式: {path}")
+
+    def extract_structured_bunker_prices(self):
+        """增强的数据提取方法"""
         try:
             doc = fitz.open(self.pdf_path)
-            result = {'bunker': 0, 'fuel': 0}
-            
-            # 处理第一页（油价数据）
-            bunker_df = self._process_page_1(doc[0])
-            if bunker_df is not None:
-                success = self._save_data(bunker_df, self.bunker_path, "BunkerPrices")
-                result['bunker'] = 1 if success else 0
+            date = None
+            new_data_count = 0
 
-            # 处理第二页（燃料数据）
-            fuel_df = self._process_page_2(doc[1])
-            if fuel_df is not None:
-                success = self._save_data(fuel_df, self.fuel_path, "FuelPrices")
-                result['fuel'] = 1 if success else 0
+            # 处理第一页
+            df_page_1 = self._process_page_1(doc[0])
+            if df_page_1 is not None:
+                if self._save_data(df_page_1, self.output_excel_paths[0], "BunkerPrices"):
+                    new_data_count += 1
+
+            # 处理第二页
+            df_page_2 = self._process_page_2(doc[1], df_page_1['Date'].iloc[0] if df_page_1 is not None else None)
+            if df_page_2 is not None:
+                if self._save_data(df_page_2, self.output_excel_paths[1], "FuelPrices"):
+                    new_data_count += 1
 
             doc.close()
-            return result
+            return new_data_count
         except Exception as e:
-            logger.error(f"PDF处理失败: {str(e)}")
-            return {'bunker': 0, 'fuel': 0}
+            self.logger.error(f"处理PDF时发生错误: {str(e)}")
+            return 0
 
-    def _get_page_coordinates(self, page, config: Dict) -> Optional[Dict]:
-        """
-        获取页面关键区域坐标
-        config示例：
-        {
-            'start_key': '起始关键词',
-            'end_key': '结束关键词',
-            'right_boundary': '右侧边界关键词',  # 可选
-            'left_boundary': '左侧边界关键词'   # 可选
-        }
-        """
+    def _get_key_coordinates(self, page, start_keyword, end_keyword, right_boundary_keyword=None, left_boundary_keyword=None):
+        """获取关键区域坐标"""
         blocks = page.get_text("blocks")
         coords = {
-            'start_y': None,
-            'end_y': None,
-            'left_x': 0,
-            'right_x': page.rect.width
+            "start_y": None,
+            "end_y": None,
+            "left_x": 0,
+            "right_x": page.rect.width
         }
 
         for block in blocks:
             text = block[4].strip()
-            # 定位起始位置
-            if config['start_key'] in text and coords['start_y'] is None:
-                coords['start_y'] = block[1]
-            # 定位结束位置
-            if config['end_key'] in text and coords['end_y'] is None:
-                coords['end_y'] = block[1]
-            # 右侧边界
-            if 'right_boundary' in config and config['right_boundary'] in text:
-                coords['right_x'] = block[0]
-            # 左侧边界
-            if 'left_boundary' in config and config['left_boundary'] in text:
-                coords['left_x'] = block[2]
+            if start_keyword in text:
+                coords["start_y"] = block[1]
+            if end_keyword in text:
+                coords["end_y"] = block[1]
+            if right_boundary_keyword and right_boundary_keyword in text:
+                coords["right_x"] = block[0]
+            if left_boundary_keyword and left_boundary_keyword in text:
+                coords["left_x"] = block[2]
 
-        if None in [coords['start_y'], coords['end_y']]:
-            logger.warning(f"页面坐标定位失败: {config}")
+        if None in coords.values():
+            self.logger.error("关键坐标定位失败")
             return None
         return coords
 
-    def _process_page_1(self, page) -> Optional[pd.DataFrame]:
-        """处理油价页面"""
-        # 定义页面解析配置
-        coord_config = {
-            'start_key': 'Bunkerwire',
-            'end_key': 'Ex-Wharf',
-            'right_boundary': 'Marine Fuel (PGB page 30)'
-        }
-        coords = self._get_page_coordinates(page, coord_config)
+    def _extract_raw_text(self, page, coords):
+        """提取指定区域的原始文本"""
+        table_rect = fitz.Rect(
+            coords["left_x"],
+            min(coords["start_y"], coords["end_y"]),
+            coords["right_x"],
+            max(coords["start_y"], coords["end_y"])
+        )
+        return page.get_text("text", clip=table_rect)
+
+    def _process_page_1(self, page):
+        """处理第一页内容并提取日期"""
+        coords = self._get_key_coordinates(page, "Bunkerwire", "Ex-Wharf", "Marine Fuel (PGB page 30)")
         if not coords:
+            self.logger.error("第一页关键坐标定位失败")
             return None
 
-        # 提取原始文本
-        raw_text = self._extract_text_from_area(page, coords)
+        raw_text = self._extract_raw_text(page, coords)
         if not raw_text:
+            self.logger.warning("第一页未提取到文本")
             return None
 
-        # 提取日期信息
-        date = self._extract_date(raw_text)
-        if not date:
+        date_pattern = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
+        match = re.search(date_pattern, raw_text)
+        if match:
+            date = match.group(1).strip()
+        else:
+            self.logger.warning("第一页未匹配到日期信息。")
             return None
 
-        # 使用优化后的正则表达式提取数据
+        try:
+            date_obj = datetime.strptime(match.group(1), "%B %d, %Y")
+            data = {"Date": date_obj.date()}  # 只保留日期部分
+        except ValueError as e:
+            self.logger.error(f"日期格式错误: {e}")
+            return None
+
         pattern = re.compile(r"([A-Za-z\s\(\)-,]+)\s+([A-Z0-9]+)\s+(NA|\d+\.\d+)\s+(NANA|[+-]?\d+\.\d+)")
         start_marker = "Singapore"
         start_index = raw_text.find(start_marker)
 
         if start_index == -1:
-            logger.warning("未找到起始标记 'Singapore'。")
+            self.logger.warning("未找到起始标记 'Singapore'。")
             return None
 
         mid_relevant_text = raw_text[start_index:]
         relevant_text = mid_relevant_text.replace("\n", " ").replace("\t", " ")
         relevant_text = re.sub(r"\s+", " ", relevant_text).strip() 
         matches = pattern.findall(relevant_text)
-        logger.debug(f"Page 1 matches: {matches}")
+        print(matches)
+
         if not matches:
-            logger.warning("未在页面1找到有效数据")
+            self.logger.warning("未匹配到任何数据。")
             return None
 
-        # 构建DataFrame
-        data = {'Date': [date]}
         for port, code, price, change in matches:
-            # 只保留有效的价格数据
-            if price != 'NA':
-                data[port.strip()] = [float(price)]
-        return pd.DataFrame(data) if len(data) > 1 else None
+            data[port.strip()] = float(price) if price != 'NA' else None  # 如果是 'NA'，保存为 None
+        return pd.DataFrame([data]).round(2)
 
-    def _process_page_2(self, page) -> Optional[pd.DataFrame]:
-        """处理燃料价格页面"""
-        coord_config = {
-            'start_key': 'Alternative marine fuels',
-            'end_key': 'Arab Gulf'
-        }
-        coords = self._get_page_coordinates(page, coord_config)
+    def _process_page_2(self, page, date):
+        """处理第二页内容"""
+        coords = self._get_key_coordinates(page, "Alternative marine fuels", "Arab Gulf")
         if not coords:
+            self.logger.error("第二页坐标定位失败")
             return None
 
-        raw_text = self._extract_text_from_area(page, coords)
+        raw_text = self._extract_raw_text(page, coords)
+
         if not raw_text:
+            self.logger.warning("第二页未提取到文本")
             return None
 
-        # 从当前页面提取日期
-        date = self._extract_date(raw_text)
-        if not date:
-            return None
-
-        # 提取燃料数据
         pattern = re.compile(r"(MLBSO00|LNBSF00)\s+(\d+\.\d+|NA)")
         matches = pattern.findall(raw_text)
-        logger.debug(f"Page 2 matches: {matches}")
+        print(matches)
         if not matches:
-            logger.warning("未在页面2找到有效数据")
+            self.logger.warning("第二页未找到燃油数据")
             return None
 
-        data = {'Date': [date]}
+        data = {"Date": date} if date else {}
         for code, value in matches:
-            if value != 'NA':
-                data[code] = [float(value)]
-        return pd.DataFrame(data) if len(data) > 1 else None
+            data[code.strip()] = float(value) if value != 'NA' else None  # 如果是 'NA'，保存为 None
+        return pd.DataFrame([data]).round(2) if data else None
 
-    def _extract_text_from_area(self, page, coords: Dict) -> str:
-        """从指定区域提取文本"""
-        rect = fitz.Rect(
-            coords['left_x'],
-            min(coords['start_y'], coords['end_y']),
-            coords['right_x'],
-            max(coords['start_y'], coords['end_y'])
-        )
-        return page.get_text("text", clip=rect)
-    def _extract_date(self, text: str) -> Optional[datetime.date]:
-        """从文本中提取日期"""
-        date_pattern = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
-        match = re.search(date_pattern, text)
-        if not match:
-            return None
+    def _save_data(self, df, output_path, sheet_name):
+        """优化后的数据存储方法"""
         try:
-            return datetime.strptime(match.group(1), "%B %d, %Y").date()
-        except ValueError:
-            return None
+            # 创建临时文件
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                temp_path = tmp.name
 
-    def _save_data(self, new_df: pd.DataFrame, output_path: str, sheet_name: str) -> bool:
-        try:
-            # 从Streamlit secrets获取配置
-            github_token = st.secrets.github.token
-            repo_name = st.secrets.github.repo
-            
-            # 初始化GitHub管理器
-            gh_manager = GitHubDataManager(github_token, repo_name)
-            
-            # 读取现有数据
-            existing_df, exists = gh_manager.read_excel(output_path)
-            if exists and not existing_df.empty:
-                # 处理列不一致问题
-                all_columns = list(set(existing_df.columns) | set(new_df.columns))
-                existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
-                new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
-                combined_df = pd.concat([existing_df, new_df])
-                combined_df = BunkerDataProcessor.clean_dataframe(combined_df)
+            # 数据清洗和验证
+            df = clean_dataframe(df)
+            df['Date'] = format_date(df['Date'])  # 确保日期格式一致
+
+            # 合并现有数据（如果存在）
+            if output_path.exists():
+                existing_df = pd.read_excel(output_path)
+                existing_df['Date'] = format_date(existing_df['Date'])  # 确保日期格式一致
+
+                combined_df, new_data_added = merge_and_sort_data(existing_df, df)
+                if not new_data_added:
+                    self.logger.info("没有新数据需要添加。")
+                    return False  # 没有新数据，直接返回
             else:
-                combined_df = BunkerDataProcessor.clean_dataframe(new_df)
-            # 按REGION_PORTS的顺序排列列
-             # 按数据类型排列列
-            if "Bunker" in sheet_name:
-                ordered_columns = ['Date'] + [port for region in REGION_PORTS.values() 
-                                            for port in region if port in combined_df.columns]
-            else:
-                # 确保所有燃料类型列都存在（不存在时填充NaN）
-                fuel_columns = ['Date'] + FUEL_TYPES
-                combined_df = combined_df.reindex(columns=fuel_columns, fill_value=pd.NA)
-                ordered_columns = fuel_columns
-            
-            combined_df = combined_df[ordered_columns]
-                
-            # 保存数据
-            return gh_manager.save_excel(
-                combined_df,
-                output_path,
-                f"Update {sheet_name} at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            )
+                combined_df = df
+
+            # 使用pandas直接保存（提升性能）
+            with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+            # 原子操作替换文件
+            os.replace(temp_path, output_path)
+            self.logger.info(f"数据已成功保存到 {output_path}")
+            return True
+
         except Exception as e:
-            logger.error(f"保存失败: {str(e)}")
+            self.logger.error(f"保存失败: {str(e)}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             return False
 
-# --------------------------
-# Streamlit界面组件
-# --------------------------
-@st.cache_data(ttl=3600, show_spinner="加载历史数据...")
-def load_history_data(path: str) -> pd.DataFrame:
-    """增强版数据加载"""
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_history_data(path):
+    """Optimized data loading with caching"""
     try:
-        github_token = st.secrets.github.token
-        repo_name = st.secrets.github.repo
-        gh_manager = GitHubDataManager(github_token, repo_name)
-        
-        df, exists = gh_manager.read_excel(path)
-        if exists:
-            processed_df = BunkerDataProcessor.clean_dataframe(df)
-            return processed_df.sort_values('Date', ascending=True)  # 按日期升序排列
-        return pd.DataFrame()
+        if path.exists():
+            df = pd.read_excel(path)
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date  # 转换为日期部分
+            logger.info(f"成功加载历史数据: {path}")
+            return df.sort_values('Date', ascending=False).reset_index(drop=True)  # 按日期降序排列
+        else:
+            logger.warning(f"文件不存在: {path}")
+            return pd.DataFrame()
     except Exception as e:
-        logger.error(f"数据加载失败: {path} - {str(e)}")
+        logger.error(f"Error loading historical data: {str(e)}")
         return pd.DataFrame()
 
-def show_status(message: str, message_type: str = "success", duration: int = 3):
-    """显示状态提示信息"""
-    if message_type == "success":
-        st.toast(f"✅ {message}", icon="✅")
-    elif message_type == "warning":
-        st.toast(f"⚠️ {message}", icon="⚠️")
-    else:
-        st.toast(f"❌ {message}", icon="❌")
-    time.sleep(duration)
 
-def generate_excel_download(df: pd.DataFrame) -> bytes:
-    """生成Excel文件字节流（添加空数据校验）"""
-    if df.empty:
-        raise ValueError("无法导出空数据集")
-    
+def show_timed_message(message, message_type="success", duration=3):
+    """显示定时消息"""
+    placeholder = st.empty()
+    if message_type == "success":
+        placeholder.success(message)
+    else:
+        placeholder.warning(message)
+    time.sleep(duration)
+    placeholder.empty()
+
+
+def generate_excel_download(df, filename):
+    """生成Excel下载链接"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     output.seek(0)
     return output.getvalue()
 
-def on_download_click(success: bool, filename: str):
-    """下载回调函数"""
-    if success:
-        st.toast(f"✅ {filename} 下载已开始，请查看浏览器下载列表")
-    else:
-        st.toast(f"⚠️ 下载文件为空，未生成下载", icon="⚠️")
 
-def main_ui():
-    """主界面布局"""
-    st.set_page_config(page_title="船燃价格分析系统", layout="wide")
-    st.title(" Mariners' Bunker Price Analysis System ")
+def main():
+    st.set_page_config(page_title="Bunker Price Analysis", layout="wide")
+    st.title("🌊 Marine Fuel Price Analysis System")
 
-    # 初始化数据存储路径
-    BUNKER_PATH = "data/bunker_prices.xlsx"
-    FUEL_PATH = "data/fuel_prices.xlsx"
+    history_dir = Path("history_data")
+    history_dir.mkdir(exist_ok=True)
+    bunker_path = history_dir / "bunker_prices_history.xlsx"
+    fuel_path = history_dir / "fuel_prices_history.xlsx"
 
-    # 初始化session状态
-    if 'processed_files' not in st.session_state:
-        st.session_state.processed_files = set()
-    if 'show_final_toast' not in st.session_state:
-        st.session_state.show_final_toast = False
-
-    # --------------------------
-    # 文件上传模块
-    # --------------------------
-    with st.expander("📤 第一步 - 上传PDF报告", expanded=True):
+    # 文件上传处理
+    with st.expander("📁 STEP 1 - 上传PDF文件", expanded=True):
         uploaded_files = st.file_uploader(
-            "选择Bunkerwire PDF报告（支持多选）",
+            "选择需要分析的Bunkerwire PDF文件", 
             type=["pdf"],
             accept_multiple_files=True,
-            help="请上传最新版的Bunkerwire PDF文件"
+            help="可同时上传多个PDF文件"
         )
 
-    # 只处理新上传的文件
-    new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
-    
-    # --------------------------
-    # 数据处理逻辑
-    # --------------------------
-    total_added = {'bunker': 0, 'fuel': 0}
-    error_messages = []
-    
-    if new_files:
-        with st.status("正在解析文件...", expanded=True) as status:
-            for file in new_files:
-                try:
-                    # 检查文件类型
-                    if file.type != "application/pdf":
-                        error_messages.append(f"❌ 文件类型错误: {file.name}（非PDF文件）")
-                        continue
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                    tmp_pdf.write(uploaded_file.getbuffer())
+                    pdf_path = tmp_pdf.name
 
-                    # 创建临时PDF文件
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(file.getbuffer())
-                        pdf_path = tmp.name
+                extractor = EnhancedBunkerPriceExtractor(pdf_path, [bunker_path, fuel_path])
+                new_data_count = extractor.extract_structured_bunker_prices()
 
-                    # 处理PDF
-                    extractor = EnhancedBunkerPriceExtractor(pdf_path, BUNKER_PATH, FUEL_PATH)
-                    result = extractor.process_pdf()
-                    
-                    # 记录处理结果
-                    if result['bunker'] > 0 or result['fuel'] > 0:
-                        st.session_state.processed_files.add(file.name)
-                        total_added['bunker'] += result['bunker']
-                        total_added['fuel'] += result['fuel']
-                        st.toast(f"✅ {file.name} 处理成功（+{result['bunker']}油价/+{result['fuel']}燃料）")
-                    else:
-                        st.toast(f"⚠️ {file.name} 无新数据（可能为重复文件）")
+                os.unlink(pdf_path)  # 删除临时文件
 
-                    # 清理临时文件
-                    os.unlink(pdf_path)
-                except Exception as e:
-                    error_messages.append(f"❌ {file.name} 处理失败: {str(e)}")
-                    logger.error(f"文件处理错误: {file.name} - {str(e)}")
+                if new_data_count > 0:
+                    show_timed_message(f"✅ 成功添加 {new_data_count} 条新数据！")
+                else:
+                    show_timed_message("⚠️ 未添加新数据（可能是重复数据）", "warning")
 
-            # 显示批量处理结果
-            status.update(label=f"处理完成！共处理{len(new_files)}个文件", state="complete")
-            st.session_state.show_final_toast = True
-
-        # 显示最终汇总提示
-        if st.session_state.show_final_toast:
-            final_message = []
-            if total_added['bunker'] + total_added['fuel'] > 0:
-                final_message.append(f"• 新增油价记录: {total_added['bunker']}")
-                final_message.append(f"• 新增燃料记录: {total_added['fuel']}")
-            if error_messages:
-                final_message.append(f"• 失败文件: {len(error_messages)}个")
-            
-            if final_message:
-                st.toast("\n".join(["处理结果汇总:"] + final_message), icon="📊")
-            
-            st.session_state.show_final_toast = False
-
-        # 清除缓存保证数据更新
+            except Exception as e:
+                st.error(f"处理文件 {uploaded_file.name} 时出错: {str(e)}")
+        # 清理缓存
         st.cache_data.clear()
 
-    # 显示错误信息（独立显示）
-    if error_messages:
-        with st.container(border=True):
-            st.error("\n\n".join(error_messages))
+    # 数据展示模块
+    bunker_df = load_history_data(bunker_path)
+    fuel_df = load_history_data(fuel_path)
 
-    # --------------------------
-    # 数据分析模块
-    # --------------------------
-    bunker_df = load_history_data(BUNKER_PATH)
-    fuel_df = load_history_data(FUEL_PATH)
-
-    with st.expander("📈 第二步 - 数据分析", expanded=True):
+    with st.expander("📊 STEP 2 - 数据分析", expanded=True):
         tab1, tab2, tab3, tab4 = st.tabs(["港口油价信息", "油价趋势分析", "燃料价格分析", "数据对比"])
 
         with tab1:
             if not bunker_df.empty:
                 st.subheader("近期油价趋势（最近10个记录）")
-                # 按日期升序显示，确保最新在下方
-                recent_data = bunker_df.sort_values('Date', ascending=True).tail(10).copy()
-                
+                recent_data = bunker_df.head(10)
+
                 for region, ports in REGION_PORTS.items():
                     st.subheader(f"🏙️ {region}")
-                    # 按预设顺序筛选存在的列
-                    region_cols = [col for col in ports if col in recent_data.columns]
-                    ordered_df = recent_data[["Date"] + region_cols]
+                    region_cols = [col for col in recent_data.columns if col in ports]
                     st.dataframe(
-                        ordered_df.set_index("Date"),
+                        recent_data[["Date"] + region_cols].set_index("Date"),
                         use_container_width=True,
-                        height=300,
-                        hide_index=False
+                        height=300
                     )
 
         with tab2:
             if not bunker_df.empty:
                 st.subheader("Multi-Port Trend Comparison")
                 col1, col2 = st.columns([3, 1])
+                
                 with col1:
                     selected_ports = st.multiselect(
                         "Select Ports for Comparison",
                         [p for p in bunker_df.columns if p != 'Date'],
                         default=COMPARE_PORTS[:2]
                     )
+                
                 with col2:
                     selected_year = st.selectbox(
                         "Select Year",
                         sorted(bunker_df['Date'].apply(lambda x: x.year).unique(), reverse=True)
                     )
-                filtered_df = bunker_df.loc[bunker_df['Date'].apply(lambda x: x.year) == selected_year]  # 使用.loc
+                
+                filtered_df = bunker_df[bunker_df['Date'].apply(lambda x: x.year) == selected_year]
+                
                 if selected_ports:
                     fig = go.Figure()
                     for port in selected_ports:
@@ -529,6 +374,7 @@ def main_ui():
                                 name=port,
                                 connectgaps=True
                             ))
+                    
                     fig.update_layout(
                         title=f"Fuel Price Trends in {selected_year}",
                         xaxis_title="Date",
@@ -537,6 +383,7 @@ def main_ui():
                         legend=dict(orientation="h", yanchor="bottom", y=1.02),
                         hovermode="x unified"
                     )
+                    
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("请选择至少一个港口进行比较。")
@@ -546,61 +393,70 @@ def main_ui():
         with tab3:
             if not fuel_df.empty:
                 st.subheader("替代燃料价格趋势")
-                # 固定列顺序：MLBSO00在前
-                fuel_cols = ['Date'] + [col for col in FUEL_TYPES if col in fuel_df.columns]
-                ordered_fuel_df = fuel_df[fuel_cols]
                 
                 st.dataframe(
-                    ordered_fuel_df.sort_values('Date', ascending=True).tail(10).set_index("Date"),
+                    fuel_df.head(10).set_index("Date"),
                     use_container_width=True
                 )
                 
                 fig = go.Figure()
-                # 按固定顺序添加轨迹
                 for fuel_type in FUEL_TYPES:
-                    if fuel_type in fuel_df.columns:
-                        fig.add_trace(go.Scatter(
-                            x=fuel_df['Date'],
-                            y=fuel_df[fuel_type],
-                            name=fuel_type,
-                            mode='lines+markers',
-                            connectgaps=True
-                        ))
+                    fig.add_trace(go.Scatter(
+                        x=fuel_df['Date'],
+                        y=fuel_df[fuel_type],
+                        name=fuel_type,
+                        mode='lines+markers',
+                        connectgaps=True
+                    ))
+                
+                fig.update_layout(
+                    height=600,
+                    template="plotly_white",
+                    yaxis_title="价格 (USD/吨)",
+                    xaxis_title="日期",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    hovermode="x unified"
+                )
                 st.plotly_chart(fig, use_container_width=True)
 
         with tab4:
+            st.subheader("指定日期港口价格对比")
             if not bunker_df.empty:
-                st.subheader("指定日期港口价格对比")
                 date_options = sorted(bunker_df['Date'].astype(str).unique(), reverse=True)
+
                 col1, col2 = st.columns(2)
                 with col1:
                     date1 = st.selectbox("选择对比日期1", date_options)
                 with col2:
                     date2 = st.selectbox("选择对比日期2", date_options)
+
                 if date1 and date2:
-                    df1 = bunker_df.loc[bunker_df['Date'].astype(str) == date1]  # 使用.loc
-                    df2 = bunker_df.loc[bunker_df['Date'].astype(str) == date2]  # 使用.loc
+                    df1 = bunker_df[bunker_df['Date'].astype(str) == date1]
+                    df2 = bunker_df[bunker_df['Date'].astype(str) == date2]
+
                     if not df1.empty and not df2.empty:
                         comparison = []
                         for port in COMPARE_PORTS:
                             if port in df1.columns and port in df2.columns:
                                 price1 = df1[port].values[0] if not df1[port].isna().all() else None
                                 price2 = df2[port].values[0] if not df2[port].isna().all() else None
+
                                 if price1 is not None and price2 is not None:
                                     change = ((price1 - price2) / price2 * 100) if price2 != 0 else None
                                 else:
                                     change = None
+
                                 comparison.append({
                                     "Port": port,
                                     date1: price1,
                                     date2: price2,
                                     "Change (%)": f"{change:.2f}%" if change is not None else "N/A"
                                 })
+
                         if comparison:
                             st.dataframe(
                                 pd.DataFrame(comparison).set_index("Port"),
-                                use_container_width=True,
-                                hide_index=False
+                                use_container_width=True
                             )
                         else:
                             st.warning("未找到选定日期的数据或选定港口的数据不完整。")
@@ -609,40 +465,31 @@ def main_ui():
             else:
                 st.warning("暂无油价数据可供对比。")
 
-    # --------------------------
-    # 数据下载模块
-    # --------------------------
-    with st.expander("📥 第三步 - 数据导出", expanded=True):
+    with st.expander("📥 STEP 3 - 数据下载", expanded=True):
         st.subheader("完整数据下载")
         col1, col2 = st.columns(2)
         with col1:
-            if bunker_df.empty:
-                st.warning("油价数据为空，无法下载")
-            else:
-                bunker_df = bunker_df[['Date'] + [col for col in bunker_df.columns if col != 'Date']]
-                data = generate_excel_download(bunker_df)
-                st.download_button(
-                    label="下载完整油价数据",
-                    data=data,
-                    file_name="bunker_prices_full.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    on_click=lambda: on_download_click(True, "油价数据")
-                )
+            if bunker_path.exists():
+                with open(bunker_path, "rb") as f:
+                    st.download_button(
+                        label="下载完整油价数据",
+                        data=f,
+                        file_name="bunker_prices_full.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
         with col2:
-            if fuel_df.empty:
-                st.warning("燃料数据为空，无法下载")
-            else:
-                data = generate_excel_download(fuel_df)
-                st.download_button(
-                    label="下载完整燃料数据",
-                    data=data,
-                    file_name="fuel_prices_full.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    on_click=lambda: on_download_click(True, "燃料数据")
-                )
+            if fuel_path.exists():
+                with open(fuel_path, "rb") as f:
+                    st.download_button(
+                        label="下载完整燃料数据",
+                        data=f,
+                        file_name="alternative_fuels_full.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
         st.subheader("单日数据下载")
         col1, col2 = st.columns(2)
+        
         with col1:
             if not bunker_df.empty:
                 selected_bunker_date = st.selectbox(
@@ -651,17 +498,13 @@ def main_ui():
                 )
                 if selected_bunker_date:
                     daily_bunker = bunker_df[bunker_df['Date'].astype(str) == selected_bunker_date]
-                    if daily_bunker.empty:
-                        st.warning("当日油价数据为空，无法下载")
-                    else:
-                        data = generate_excel_download(daily_bunker)
-                        st.download_button(
-                            label="下载当日油价数据",
-                            data=data,
-                            file_name=f"bunker_{selected_bunker_date}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            on_click=lambda: on_download_click(True, f"当日油价数据 ({selected_bunker_date})")
-                        )
+                    st.download_button(
+                        label="下载当日油价数据",
+                        data=generate_excel_download(daily_bunker, "daily_bunker.xlsx"),
+                        file_name=f"bunker_{selected_bunker_date}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+        
         with col2:
             if not fuel_df.empty:
                 selected_fuel_date = st.selectbox(
@@ -670,17 +513,12 @@ def main_ui():
                 )
                 if selected_fuel_date:
                     daily_fuel = fuel_df[fuel_df['Date'].astype(str) == selected_fuel_date]
-                    if daily_fuel.empty:
-                        st.warning("当日燃料数据为空，无法下载")
-                    else:
-                        data = generate_excel_download(daily_fuel)
-                        st.download_button(
-                            label="下载当日燃料数据",
-                            data=data,
-                            file_name=f"fuel_{selected_fuel_date}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            on_click=lambda: on_download_click(True, f"当日燃料数据 ({selected_fuel_date})")
-                        )
+                    st.download_button(
+                        label="下载当日燃料数据",
+                        data=generate_excel_download(daily_fuel, "daily_fuel.xlsx"),
+                        file_name=f"fuel_{selected_fuel_date}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
 if __name__ == "__main__":
-    main_ui()
+    main()
