@@ -311,8 +311,8 @@ class EnhancedBunkerPriceExtractor:
         if not raw_text:
             return None
 
-        # 提取燃料数据
-        pattern = re.compile(r"(MLBSO00|LNBSF00)\s+(\d+\.\d+|NA)")
+        # 提取燃料数据 - 加强版正则表达式
+        pattern = re.compile(r"(?:MLBSO00|LNBSF00)\s+(\d+\.\d+|\w+)")
         matches = pattern.findall(raw_text)
         logger.debug(f"Page 2 matches: {matches}")
         if not matches:
@@ -320,9 +320,22 @@ class EnhancedBunkerPriceExtractor:
             return None
 
         data = {'Date': [date]} if date else {}
-        for code, value in matches:
-            if value != 'NA':
-                data[code] = [float(value)]
+        
+        # 按固定顺序处理燃料类型
+        for fuel_type in FUEL_TYPES:
+            # 查找燃料类型对应的价格
+            if fuel_type in raw_text:
+                # 查找下一个数字值
+                match = re.search(rf"{fuel_type}\s+(\d+\.\d+|\w+)", raw_text)
+                if match:
+                    value = match.group(1)
+                    if value != 'NA':
+                        data[fuel_type] = [float(value)]
+                else:
+                    data[fuel_type] = [pd.NA]
+            else:
+                data[fuel_type] = [pd.NA]
+
         return pd.DataFrame(data) if len(data) > 1 else None
 
     def _extract_text_from_area(self, page, coords: Dict) -> str:
@@ -361,17 +374,23 @@ class EnhancedBunkerPriceExtractor:
                 all_columns = list(set(existing_df.columns) | set(new_df.columns))
                 existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
                 new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
-                combined_df = pd.concat([existing_df, new_df])
+                
+                # 合并数据并去重
+                combined_df = pd.concat([existing_df, new_df]).drop_duplicates(subset=['Date'], keep='last')
             else:
                 combined_df = new_df
 
-            # 合并数据后强制添加燃料类型列
+            # 强制添加燃料类型列
             if sheet_name == "FuelPrices":
                 for fuel_type in FUEL_TYPES:
                     if fuel_type not in combined_df.columns:
                         combined_df[fuel_type] = pd.NA
                 
-    # 保存数据
+            # 按日期排序
+            if 'Date' in combined_df.columns:
+                combined_df = combined_df.sort_values('Date', ascending=False).reset_index(drop=True)
+            
+            # 保存数据
             return gh_manager.save_excel(
                 combined_df,
                 output_path,
