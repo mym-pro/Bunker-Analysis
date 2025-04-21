@@ -139,7 +139,7 @@ class EnhancedBunkerPriceExtractor:
                 result['bunker'] = 1 if success else 0
 
             # 处理第二页（燃料数据）
-            fuel_df = self._process_page_2(doc[1], bunker_df['Date'].iloc[0] if bunker_df is not None else None)
+            fuel_df = self._process_page_2(doc[1])
             if fuel_df is not None:
                 success = self._save_data(fuel_df, self.fuel_path, "FuelPrices")
                 result['fuel'] = 1 if success else 0
@@ -237,7 +237,7 @@ class EnhancedBunkerPriceExtractor:
                 data[port.strip()] = [float(price)]
         return pd.DataFrame(data) if len(data) > 1 else None
 
-    def _process_page_2(self, page, date) -> Optional[pd.DataFrame]:
+    def _process_page_2(self, page) -> Optional[pd.DataFrame]:
         """处理燃料价格页面"""
         coord_config = {
             'start_key': 'Alternative marine fuels',
@@ -251,6 +251,11 @@ class EnhancedBunkerPriceExtractor:
         if not raw_text:
             return None
 
+        # 从当前页面提取日期
+        date = self._extract_date(raw_text)
+        if not date:
+            return None
+
         # 提取燃料数据
         pattern = re.compile(r"(MLBSO00|LNBSF00)\s+(\d+\.\d+|NA)")
         matches = pattern.findall(raw_text)
@@ -259,7 +264,7 @@ class EnhancedBunkerPriceExtractor:
             logger.warning("未在页面2找到有效数据")
             return None
 
-        data = {'Date': [date]} if date else {}
+        data = {'Date': [date]}
         for code, value in matches:
             if value != 'NA':
                 data[code] = [float(value)]
@@ -306,7 +311,14 @@ class EnhancedBunkerPriceExtractor:
             else:
                 combined_df = BunkerDataProcessor.clean_dataframe(new_df)
             # 按REGION_PORTS的顺序排列列
-            ordered_columns = ['Date'] + [port for region in REGION_PORTS.values() for port in region if port in combined_df.columns]
+             # 按数据类型排列列
+            if "Bunker" in sheet_name:
+                ordered_columns = ['Date'] + [port for region in REGION_PORTS.values() 
+                                            for port in region if port in combined_df.columns]
+            else:
+                fuel_columns = ['Date'] + FUEL_TYPES
+                ordered_columns = [col for col in fuel_columns if col in combined_df.columns]
+            
             combined_df = combined_df[ordered_columns]
                 
             # 保存数据
