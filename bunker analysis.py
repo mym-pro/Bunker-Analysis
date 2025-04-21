@@ -106,21 +106,72 @@ class GitHubDataManager:
             return pd.DataFrame(), False  # 明确返回元组
     
     def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
-        """保存Excel文件到GitHub"""
+        """保存Excel文件到GitHub（完整修改版）"""
         try:
+            # 读取现有数据
+            existing_df, exists = self.read_excel(file_path)
+            if not exists:
+                existing_df = pd.DataFrame()
+
+            # 列对齐逻辑
+            if not existing_df.empty and not df.empty:
+                # 合并所有可能的列
+                all_columns = list(set(existing_df.columns).union(set(df.columns)))
+                
+                # 重新索引对齐列
+                existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
+                new_df = df.reindex(columns=all_columns, fill_value=pd.NA)
+                
+                # 合并数据
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            elif not existing_df.empty:
+                combined_df = existing_df
+            else:
+                combined_df = df
+
+            # 特殊处理燃料数据：强制补全燃料类型列
+            if "FuelPrices" in commit_msg:
+                for fuel_type in FUEL_TYPES:
+                    if fuel_type not in combined_df.columns:
+                        combined_df[fuel_type] = pd.NA
+
+            # 数据清洗：按日期去重并排序
+            if 'Date' in combined_df.columns:
+                combined_df = (
+                    combined_df
+                    .sort_values('Date', ascending=False)
+                    .drop_duplicates('Date', keep='first')
+                    .reset_index(drop=True)
+                )
+
+            # 生成Excel文件
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
+                combined_df.to_excel(writer, index=False)
             content = output.getvalue()
-            
+
+            # 上传到GitHub
             try:
+                # 尝试更新现有文件
                 contents = self.repo.get_contents(file_path)
-                self.repo.update_file(contents.path, commit_msg, content, contents.sha)
-            except:
-                self.repo.create_file(file_path, commit_msg, content)
+                update_response = self.repo.update_file(
+                    path=contents.path,
+                    message=commit_msg,
+                    content=content,
+                    sha=contents.sha
+                )
+            except Exception as update_error:
+                # 文件不存在则创建新文件
+                create_response = self.repo.create_file(
+                    path=file_path,
+                    message=commit_msg,
+                    content=content
+                )
+            
             return True
+
         except Exception as e:
-            logger.error(f"GitHub保存失败: {str(e)}")
+            logger.error(f"保存失败: {str(e)}")
             return False
 
 class EnhancedBunkerPriceExtractor:
@@ -313,8 +364,14 @@ class EnhancedBunkerPriceExtractor:
                 combined_df = pd.concat([existing_df, new_df])
             else:
                 combined_df = new_df
+
+            # 合并数据后强制添加燃料类型列
+            if sheet_name == "FuelPrices":
+                for fuel_type in FUEL_TYPES:
+                    if fuel_type not in combined_df.columns:
+                        combined_df[fuel_type] = pd.NA
                 
-            # 保存数据
+    # 保存数据
             return gh_manager.save_excel(
                 combined_df,
                 output_path,
@@ -537,28 +594,39 @@ def main_ui():
         with tab3:
             if not fuel_df.empty:
                 st.subheader("替代燃料价格趋势")
-                st.dataframe(
-                    fuel_df.head(10).set_index("Date"),
-                    use_container_width=True
-                )
-                fig = go.Figure()
-                for fuel_type in FUEL_TYPES:
-                    fig.add_trace(go.Scatter(
-                        x=fuel_df['Date'],
-                        y=fuel_df[fuel_type],
-                        name=fuel_type,
-                        mode='lines+markers',
-                        connectgaps=True
-                    ))
-                fig.update_layout(
-                    height=600,
-                    template="plotly_white",
-                    yaxis_title="价格 (USD/吨)",
-                    xaxis_title="日期",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    hovermode="x unified"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                
+                # 筛选可用的燃料类型
+                available_fuels = [ft for ft in FUEL_TYPES if ft in fuel_df.columns]
+                missing_fuels = [ft for ft in FUEL_TYPES if ft not in fuel_df.columns]
+                
+                if available_fuels:
+                    st.dataframe(
+                        fuel_df[["Date"] + available_fuels].head(10).set_index("Date"),
+                        use_container_width=True
+                    )
+                    fig = go.Figure()
+                    for fuel_type in available_fuels:
+                        fig.add_trace(go.Scatter(
+                            x=fuel_df['Date'],
+                            y=fuel_df[fuel_type],
+                            name=fuel_type,
+                            mode='lines+markers',
+                            connectgaps=True
+                        ))
+                    fig.update_layout(
+                        height=600,
+                        template="plotly_white",
+                        yaxis_title="价格 (USD/吨)",
+                        xaxis_title="日期",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        hovermode="x unified"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("当前燃料数据中没有可用的燃料类型。")
+                
+                if missing_fuels:
+                    st.warning(f"以下燃料类型数据缺失: {', '.join(missing_fuels)}")
             else:
                 st.warning("暂无燃料价格数据。")
 
@@ -572,24 +640,33 @@ def main_ui():
                 with col2:
                     date2 = st.selectbox("选择对比日期2", date_options)
                 if date1 and date2:
-                    df1 = bunker_df.loc[bunker_df['Date'].astype(str) == date1]  # 使用.loc
-                    df2 = bunker_df.loc[bunker_df['Date'].astype(str) == date2]  # 使用.loc
+                    df1 = bunker_df.loc[bunker_df['Date'].astype(str) == date1]
+                    df2 = bunker_df.loc[bunker_df['Date'].astype(str) == date2]
                     if not df1.empty and not df2.empty:
                         comparison = []
                         for port in COMPARE_PORTS:
-                            if port in df1.columns and port in df2.columns:
-                                price1 = df1[port].values[0] if not df1[port].isna().all() else None
-                                price2 = df2[port].values[0] if not df2[port].isna().all() else None
-                                if price1 is not None and price2 is not None:
-                                    change = ((price1 - price2) / price2 * 100) if price2 != 0 else None
-                                else:
-                                    change = None
-                                comparison.append({
-                                    "Port": port,
-                                    date1: price1,
-                                    date2: price2,
+                            row = {"Port": port}
+                            # 检查两个日期中港口数据是否存在
+                            has_data1 = port in df1.columns and not pd.isna(df1[port].iloc[0])
+                            has_data2 = port in df2.columns and not pd.isna(df2[port].iloc[0])
+                            
+                            if has_data1 and has_data2:
+                                price1 = df1[port].iloc[0]
+                                price2 = df2[port].iloc[0]
+                                change = ((price1 - price2) / price2 * 100) if price2 != 0 else None
+                                row.update({
+                                    date1: f"{price1:.2f}",
+                                    date2: f"{price2:.2f}",
                                     "Change (%)": f"{change:.2f}%" if change is not None else "N/A"
                                 })
+                            else:
+                                row.update({
+                                    date1: "N/A" if not has_data1 else f"{df1[port].iloc[0]:.2f}",
+                                    date2: "N/A" if not has_data2 else f"{df2[port].iloc[0]:.2f}",
+                                    "Change (%)": "数据不完整"
+                                })
+                            comparison.append(row)
+                        
                         if comparison:
                             st.dataframe(
                                 pd.DataFrame(comparison).set_index("Port"),
