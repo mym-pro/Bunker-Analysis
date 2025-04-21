@@ -341,14 +341,24 @@ class EnhancedBunkerPriceExtractor:
             
             # 读取现有数据
             existing_df, exists = gh_manager.read_excel(output_path)
+            
+            # 数据清洗：确保日期格式统一
+            if 'Date' in new_df.columns:
+                new_df['Date'] = pd.to_datetime(new_df['Date'])
+            
             if exists and not existing_df.empty:
+                # 数据清洗：确保现有数据日期格式统一
+                if 'Date' in existing_df.columns:
+                    existing_df['Date'] = pd.to_datetime(existing_df['Date'])
+                
                 # 处理列不一致问题
                 all_columns = list(set(existing_df.columns) | set(new_df.columns))
                 existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
                 new_df = new_df.reindex(columns=all_columns, fill_value=pd.NA)
                 
-                # 合并数据并去重
-                combined_df = pd.concat([existing_df, new_df]).drop_duplicates(subset=['Date'], keep='last')
+                # 合并数据并去重（保留最新数据）
+                combined_df = pd.concat([existing_df, new_df])
+                combined_df = combined_df.drop_duplicates(subset=['Date'], keep='last')
             else:
                 combined_df = new_df
 
@@ -366,8 +376,8 @@ class EnhancedBunkerPriceExtractor:
             
             # 按日期排序
             if 'Date' in combined_df.columns:
-                combined_df['Date'] = pd.to_datetime(combined_df['Date'])
                 combined_df = combined_df.sort_values('Date', ascending=False).reset_index(drop=True)
+                # 将日期列转换为日期格式（非datetime）
                 combined_df['Date'] = combined_df['Date'].dt.date
             
             # 保存数据
