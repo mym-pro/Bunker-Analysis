@@ -316,8 +316,10 @@ class EnhancedBunkerPriceExtractor:
                 ordered_columns = ['Date'] + [port for region in REGION_PORTS.values() 
                                             for port in region if port in combined_df.columns]
             else:
+                # 确保所有燃料类型列都存在（不存在时填充NaN）
                 fuel_columns = ['Date'] + FUEL_TYPES
-                ordered_columns = [col for col in fuel_columns if col in combined_df.columns]
+                combined_df = combined_df.reindex(columns=fuel_columns, fill_value=pd.NA)
+                ordered_columns = fuel_columns
             
             combined_df = combined_df[ordered_columns]
                 
