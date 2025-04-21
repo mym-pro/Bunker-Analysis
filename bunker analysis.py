@@ -334,6 +334,7 @@ def main():
                     selected_year = st.selectbox(
                         "Select Year",
                         sorted(bunker_df['Date'].apply(lambda x: x.year).unique(), reverse=True)
+                    )
                 filtered_df = bunker_df[bunker_df['Date'].apply(lambda x: x.year) == selected_year]
                 if selected_ports:
                     fig = go.Figure()
