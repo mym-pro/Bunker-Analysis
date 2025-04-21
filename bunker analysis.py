@@ -101,53 +101,25 @@ class GitHubDataManager:
         """修复返回值问题"""
         try:
             contents = self.repo.get_contents(file_path)
-            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), sheet_name=0), True
+            df = pd.read_excel(BytesIO(base64.b64decode(contents.content)), sheet_name=0)
+            # 确保日期列是datetime类型
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+            return df, True
         except Exception as e:
             return pd.DataFrame(), False  # 明确返回元组
     
     def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
         """保存Excel文件到GitHub（完整修改版）"""
         try:
-            # 读取现有数据
-            existing_df, exists = self.read_excel(file_path)
-            if not exists:
-                existing_df = pd.DataFrame()
-
-            # 列对齐逻辑
-            if not existing_df.empty and not df.empty:
-                # 合并所有可能的列
-                all_columns = list(set(existing_df.columns).union(set(df.columns)))
-                
-                # 重新索引对齐列
-                existing_df = existing_df.reindex(columns=all_columns, fill_value=pd.NA)
-                new_df = df.reindex(columns=all_columns, fill_value=pd.NA)
-                
-                # 合并数据
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            elif not existing_df.empty:
-                combined_df = existing_df
-            else:
-                combined_df = df
-
-            # 特殊处理燃料数据：强制补全燃料类型列
-            if "FuelPrices" in commit_msg:
-                for fuel_type in FUEL_TYPES:
-                    if fuel_type not in combined_df.columns:
-                        combined_df[fuel_type] = pd.NA
-
-            # 数据清洗：按日期去重并排序
-            if 'Date' in combined_df.columns:
-                combined_df = (
-                    combined_df
-                    .sort_values('Date', ascending=False)
-                    .drop_duplicates('Date', keep='first')
-                    .reset_index(drop=True)
-                )
-
+            # 确保日期列是datetime类型
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+            
             # 生成Excel文件
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                combined_df.to_excel(writer, index=False)
+                df.to_excel(writer, index=False)
             content = output.getvalue()
 
             # 上传到GitHub
@@ -385,10 +357,18 @@ class EnhancedBunkerPriceExtractor:
                 for fuel_type in FUEL_TYPES:
                     if fuel_type not in combined_df.columns:
                         combined_df[fuel_type] = pd.NA
-                
+            elif sheet_name == "BunkerPrices":
+                # 确保所有港口列都存在
+                all_ports = [port for region in REGION_PORTS.values() for port in region]
+                for port in all_ports:
+                    if port not in combined_df.columns:
+                        combined_df[port] = pd.NA
+            
             # 按日期排序
             if 'Date' in combined_df.columns:
+                combined_df['Date'] = pd.to_datetime(combined_df['Date'])
                 combined_df = combined_df.sort_values('Date', ascending=False).reset_index(drop=True)
+                combined_df['Date'] = combined_df['Date'].dt.date
             
             # 保存数据
             return gh_manager.save_excel(
@@ -413,7 +393,8 @@ def load_history_data(path: str) -> pd.DataFrame:
         
         df, exists = gh_manager.read_excel(path)
         if exists:
-            df['Date'] = BunkerDataProcessor.format_date(df['Date'])
+            if 'Date' in df.columns:
+                df['Date'] = df['Date'].dt.date
             return df.sort_values('Date', ascending=False).reset_index(drop=True)
         return pd.DataFrame()
     except Exception as e:
