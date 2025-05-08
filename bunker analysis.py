@@ -350,7 +350,7 @@ def main_ui():
             df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
             tab1_columns = [col for col in TAB1_COLUMN_ORDER if col in df_display.columns]
             df_display = df_display[['Date'] + tab1_columns]
-            df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})", inplace=True)
+            df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
             st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
             
             st.subheader("数据下载")
@@ -383,7 +383,7 @@ def main_ui():
                 region_order.extend(REGION_ORDER[region])
             df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
             df_display = df_display[['Date'] + [col for col in region_order if col in df_display.columns]]
-            df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})", inplace=True)
+            df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
             st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
             
             st.subheader("数据下载")
