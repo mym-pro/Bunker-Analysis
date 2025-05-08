@@ -157,6 +157,7 @@ class GitHubDataManager:
             dir_path = os.path.dirname(file_path)
             if dir_path:
                 try:
+                    # 检查目录是否存在
                     self.repo.get_contents(dir_path)
                 except Exception as e:
                     # 创建目录
@@ -177,14 +178,14 @@ class GitHubDataManager:
                 contents = self.repo.get_contents(file_path)
                 self.repo.update_file(contents.path, commit_msg, content, contents.sha)
             except:
-                self.repo.create_file(file_path, commit_msg, content)
+                self.repo.create_file(file_path, commit_msg, base64.b64encode(content).decode())
             return True
         except Exception as e:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
 
 # --------------------------
-# PDF数据提取器（重大修改）
+# PDF数据提取器（修改后的版本，结合代码1的区域划分逻辑）
 # --------------------------
 class EnhancedBunkerPriceExtractor:
     def __init__(self, pdf_path: str, bunker_path: str, fuel_path: str):
@@ -215,15 +216,69 @@ class EnhancedBunkerPriceExtractor:
             logger.error(f"PDF处理失败: {str(e)}")
             return {'bunker': 0, 'fuel': 0}
 
+    def _get_page_coordinates(self, page, config: Dict) -> Optional[Dict]:
+        """获取页面关键区域坐标"""
+        blocks = page.get_text("blocks")
+        coords = {
+            'start_y': None,
+            'end_y': None,
+            'left_x': 0,
+            'right_x': page.rect.width
+        }
+
+        for block in blocks:
+            text = block[4].strip()
+            # 定位起始位置
+            if config['start_key'] in text and coords['start_y'] is None:
+                coords['start_y'] = block[1]
+            # 定位结束位置
+            if config['end_key'] in text and coords['end_y'] is None:
+                coords['end_y'] = block[1]
+            # 右侧边界
+            if 'right_boundary' in config and config['right_boundary'] in text:
+                coords['right_x'] = block[0]
+            # 左侧边界
+            if 'left_boundary' in config and config['left_boundary'] in text:
+                coords['left_x'] = block[2]
+
+        if None in [coords['start_y'], coords['end_y']]:
+            logger.warning(f"页面坐标定位失败: {config}")
+            return None
+        return coords
+
+    def _extract_text_from_area(self, page, coords: Dict) -> str:
+        """从指定区域提取文本"""
+        rect = fitz.Rect(
+            coords['left_x'],
+            min(coords['start_y'], coords['end_y']),
+            coords['right_x'],
+            max(coords['start_y'], coords['end_y'])
+        )
+        return page.get_text("text", clip=rect)
+
     def _process_bunker_page(self, page) -> Optional[pd.DataFrame]:
-        full_text = page.get_text("text")
-        date = self._extract_date(full_text)
+        # 定义页面解析配置
+        coord_config = {
+            'start_key': 'Bunkerwire',
+            'end_key': 'Ex-Wharf',
+            'right_boundary': 'Marine Fuel (PGB page 30)'
+        }
+        coords = self._get_page_coordinates(page, coord_config)
+        if not coords:
+            return None
+
+        # 提取指定区域的文本
+        raw_text = self._extract_text_from_area(page, coords)
+        if not raw_text:
+            return None
+
+        date = self._extract_date(raw_text)
         if not date:
             return None
 
         # 使用精确正则表达式匹配
         pattern = re.compile(r"([A-Z]{6,8}00)\s+(\d+\.\d+|NA)\s+([+-]?\d+\.\d+|NANA)")
-        matches = pattern.findall(full_text)
+        matches = pattern.findall(raw_text)
         if not matches:
             return None
 
@@ -237,13 +292,26 @@ class EnhancedBunkerPriceExtractor:
         return pd.DataFrame(data)
 
     def _process_fuel_page(self, page) -> Optional[pd.DataFrame]:
-        full_text = page.get_text("text")
-        date = self._extract_date(full_text)
+        # 定义页面解析配置
+        coord_config = {
+            'start_key': 'Alternative marine fuels',
+            'end_key': 'Arab Gulf'
+        }
+        coords = self._get_page_coordinates(page, coord_config)
+        if not coords:
+            return None
+
+        # 提取指定区域的文本
+        raw_text = self._extract_text_from_area(page, coords)
+        if not raw_text:
+            return None
+
+        date = self._extract_date(raw_text)
         if not date:
             return None
 
         pattern = re.compile(r"(MLBSO00|LNBSF00)\s+(\d+\.\d+|NA)")
-        matches = pattern.findall(full_text)
+        matches = pattern.findall(raw_text)
         if not matches:
             return None
 
@@ -296,6 +364,7 @@ def load_history_data(path: str, data_type: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"数据加载失败: {path} - {str(e)}")
         return pd.DataFrame()
+
 def generate_excel_download(df: pd.DataFrame) -> bytes:
     """增强的空数据校验"""
     if df.empty:
@@ -305,6 +374,7 @@ def generate_excel_download(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False)
     output.seek(0)
     return output.getvalue()
+
 def on_download_click(success: bool, filename: str):
     """下载状态提示"""
     if success:
