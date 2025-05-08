@@ -87,17 +87,26 @@ FUEL_TYPE_MAPPING = {
 class BunkerDataProcessor:
     @staticmethod
     def format_date(date_series: pd.Series) -> pd.Series:
-        return pd.to_datetime(date_series, errors='coerce').dt.date
+        # 增强日期处理逻辑
+        return pd.to_datetime(
+            date_series,
+            errors='coerce',  # 将无效日期转为NaT
+            format='mixed'    # 自动识别多种日期格式
+        ).dt.date
 
     @staticmethod
     def clean_dataframe(df: pd.DataFrame, data_type: str = "bunker") -> pd.DataFrame:
         if df.empty:
             return df
 
-        # 统一日期格式
+        # 统一日期格式（增强处理）
         if 'Date' in df.columns:
-            df['Date'] = BunkerDataProcessor.format_date(df['Date'])
-            df = df.dropna(subset=['Date'])
+            # 先转换为datetime类型
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            # 过滤无效日期
+            df = df[df['Date'].notna()]
+            # 转换为date类型
+            df['Date'] = df['Date'].dt.date
 
         # 按数据类型处理列顺序
         if data_type == "bunker":
@@ -471,6 +480,10 @@ def main_ui():
         # Tab4 - 趋势分析（原TAB3）
         with tab4:
             if not bunker_df.empty:
+                # 添加类型转换确保Date列是datetime类型
+                bunker_df['Date'] = pd.to_datetime(bunker_df['Date'], errors='coerce')
+                bunker_df = bunker_df.dropna(subset=['Date'])
+                
                 st.subheader("多港口趋势对比分析")
                 
                 # 控件布局
@@ -489,14 +502,17 @@ def main_ui():
                             )
                             selected_ports.extend(selected)
                 with col2:
-                    year_options = sorted(bunker_df['Date'].dt.year.unique(), reverse=True)
-                    selected_year = st.selectbox("选择年份", year_options)
+                    # 修改年份获取方式
+                    if not bunker_df.empty:
+                        bunker_df['Year'] = bunker_df['Date'].dt.year  # 现在可以安全使用.dt
+                        year_options = sorted(bunker_df['Year'].unique(), reverse=True)
+                        selected_year = st.selectbox("选择年份", year_options)
                 with col3:
                     st.markdown("###")
                     show_annotations = st.checkbox("显示数据点", value=True)
                 
                 # 数据处理
-                filtered_df = bunker_df[bunker_df['Date'].dt.year == selected_year]
+                filtered_df = bunker_df[bunker_df['Year'] == selected_year]
                 if selected_ports:
                     # 创建趋势图
                     fig = go.Figure()
@@ -530,9 +546,11 @@ def main_ui():
         with tab5:
             if not bunker_df.empty:
                 st.subheader("跨日期数据对比分析")
+                # 确保日期列是datetime类型
+                bunker_df['Date'] = pd.to_datetime(bunker_df['Date'])
                 
                 # 日期选择
-                date_options = bunker_df['Date'].sort_values(ascending=False).dt.strftime('%Y-%m-%d').unique()
+                date_options = bunker_df['Date'].dt.strftime('%Y-%m-%d').sort_values(ascending=False).unique()
                 col1, col2 = st.columns(2)
                 with col1:
                     date1 = st.selectbox("对比日期1", date_options, index=0)
