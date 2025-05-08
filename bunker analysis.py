@@ -169,14 +169,23 @@ class EnhancedBunkerPriceExtractor:
         if not matches:
             return None
 
-        data = {'Date': [date]}
+        # 初始化所有需要的列
+        all_columns = ['Date'] + [col for region in REGION_ORDER.values() for col in region]
+        data = {col: [None] for col in all_columns}
+        data['Date'] = [date]
+
         for port, code, price, _ in matches:
             if price != 'NA' and code in PORT_CODE_MAPPING:
                 try:
                     data[code] = [float(price)]
                 except ValueError:
                     continue
-        return pd.DataFrame(data) if len(data) > 1 else None
+
+        df = pd.DataFrame(data)
+        if len(df) > 1:
+            logger.debug(f"Extracted DataFrame columns: {df.columns}")
+            return df
+        return None
 
     def _process_page_2(self, page) -> Optional[pd.DataFrame]:
         coord_config = {'start_key': 'Alternative marine fuels', 'end_key': 'Arab Gulf'}
@@ -269,10 +278,22 @@ def load_history_data(path: str) -> pd.DataFrame:
         repo_name = st.secrets.github.repo
         gh_manager = GitHubDataManager(github_token, repo_name)
         df, exists = gh_manager.read_excel(path)
-        return df if exists else pd.DataFrame()
+        if exists:
+            # 确保所有需要的列都存在
+            all_columns = ['Date'] + [col for region in REGION_ORDER.values() for col in region]
+            df = ensure_columns(df, all_columns)
+            return BunkerDataProcessor.clean_dataframe(df)
+        else:
+            return pd.DataFrame()
     except Exception as e:
         logger.error(f"数据加载失败: {path} - {str(e)}")
         return pd.DataFrame()
+
+def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    missing_columns = [col for col in columns if col not in df.columns]
+    for col in missing_columns:
+        df[col] = pd.NA
+    return df
 
 def generate_excel_download(df: pd.DataFrame) -> bytes:
     output = BytesIO()
@@ -363,8 +384,12 @@ def main_ui():
             region_order = []
             for region in ["Asia Pacific/Middle East", "Europe", "Americas"]:
                 region_order.extend(REGION_ORDER[region])
+            
+            # 确保所有需要的列都存在
+            bunker_df = ensure_columns(bunker_df, region_order)
+            
             df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
-            df_display = df_display[['Date'] + [col for col in region_order if col in df_display.columns]]
+            df_display = df_display[['Date'] + region_order]
             df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
             st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
             
@@ -482,13 +507,18 @@ def main_ui():
                                 date2: price2,
                                 "Change (%)": f"{change:.2f}%" if change is not None else "N/A"
                             })
-                            if comparison:
-                                st.dataframe(
-                                    pd.DataFrame(comparison).set_index("Port"),
-                                    use_container_width=True,
-                                    hide_index=False
-                                )
-                            else:
-                                st.warning("未找到选定日期的数据或选定港口的数据不完整。")
+                    if comparison:
+                        st.dataframe(
+                            pd.DataFrame(comparison).set_index("Port"),
+                            use_container_width=True,
+                            hide_index=False
+                        )
+                    else:
+                        st.warning("未找到选定日期的数据或选定港口的数据不完整。")
+                else:
+                    st.warning("未找到选定日期的数据。")
+        else:
+            st.warning("暂无油价数据可供对比。")
+
 if __name__ == "__main__":
     main_ui()
