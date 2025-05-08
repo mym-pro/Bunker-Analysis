@@ -153,6 +153,18 @@ class GitHubDataManager:
 
     def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str, data_type: str) -> bool:
         try:
+            # 确保路径存在
+            dir_path = os.path.dirname(file_path)
+            if dir_path:
+                try:
+                    self.repo.get_contents(dir_path)
+                except Exception as e:
+                    # 创建目录
+                    self.repo.create_file(
+                        path=f"{dir_path}/.gitkeep",
+                        message=f"Create directory {dir_path}",
+                        content=""
+                    )
             # 按数据类型处理列顺序
             processed_df = BunkerDataProcessor.clean_dataframe(df, data_type)
             
@@ -324,9 +336,15 @@ def main_ui():
     new_files = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
     if new_files:
         with st.status("正在解析文件...", expanded=True) as status:
+            progress_bar = st.progress(0)
+            total_files = len(new_files)
             total_added = {'bunker': 0, 'fuel': 0}
-            for file in new_files:
+            
+            for idx, file in enumerate(new_files):
                 try:
+                    # 显示处理进度
+                    progress_bar.progress((idx+1)/total_files, text=f"正在处理 {file.name} ({idx+1}/{total_files})")
+                    
                     with tempfile.NamedTemporaryFile(delete=False) as tmp:
                         tmp.write(file.getbuffer())
                         extractor = EnhancedBunkerPriceExtractor(tmp.name, BUNKER_PATH, FUEL_PATH)
@@ -335,9 +353,13 @@ def main_ui():
                         total_added['fuel'] += result['fuel']
                         st.session_state.processed_files.add(file.name)
                     os.unlink(tmp.name)
+                    
+                    # 实时显示处理结果
+                    st.write(f"✅ {file.name} 处理完成 (油价+{result['bunker']}, 燃料+{result['fuel']})")
                 except Exception as e:
                     st.error(f"处理失败 {file.name}: {str(e)}")
-            status.update(label=f"处理完成！新增{total_added}条记录", state="complete")
+            
+            status.update(label=f"处理完成！共新增油价{total_added['bunker']}条，燃料{total_added['fuel']}条", state="complete")
             st.cache_data.clear()
 
     # 数据分析模块
