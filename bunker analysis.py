@@ -41,66 +41,6 @@ REGION_PORTS = {
 COMPARE_PORTS = ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"]
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
-# 新增常量定义
-PORT_CODE_MAPPING = {
-    # Asia Pacific/Middle East
-    "MFSPD00": "Singapore", "MFFJD00": "Fujairah", "MFJPD00": "Japan",
-    "BAMFB00": "West Japan", "MFSKD00": "South Korea", "WKMFA00": "South Korea (West)",
-    "MFHKD00": "Hong Kong", "MFSHD00": "Shanghai", "MFZSD00": "Zhoushan",
-    "MFDSY00": "Sydney", "MFDMB00": "Melbourne", "MFDKW00": "Kuwait",
-    "MFDKF00": "Khor Fakkan", "MFDMM00": "Mumbai", "MFDCL00": "Colombo",
-    # Europe
-    "MFAGD00": "Algeciras", "MFDBD00": "Durban", "MFGBD00": "Gibraltar",
-    "MFMLD00": "Malta", "MFPRD00": "Piraeus", "MFRDD00": "Rotterdam",
-    "MFDAN00": "Antwerp", "MFDGT00": "Gothenburg", "MFDHB00": "Hamburg",
-    "MFDIS00": "Istanbul", "MFDLP00": "Las Palmas", "MFDNV00": "Novorossiisk",
-    "MFDPT00": "St. Petersburg", "MFLIS00": "Lisbon", "MFLOM00": "Lome",
-    # Americas
-    "MFHOD00": "Houston", "MFNYD00": "New York", "MFLAD00": "Los Angeles",
-    "MFNOD00": "New Orleans", "MFPAD00": "Philadelphia", "MFSED00": "Seattle",
-    "MFVAD00": "Vancouver", "MFBAD00": "Buenos Aires", "MFCRD00": "Cartagena",
-    "MFSAD00": "Santos", "AMFVA00": "Valparaiso", "AMFCA00": "Callao",
-    "AMFGY00": "Guayaquil", "AMFLB00": "La Libertad", "AMFMT00": "Montevideo",
-    "AMFSF00": "San Francisco", "AMFMO00": "Montreal*"
-}
-
-REGION_CODE_ORDER = [
-    ("Asia Pacific/Middle East", [
-        "MFSPD00", "MFFJD00", "MFJPD00", "BAMFB00", "MFSKD00",
-        "WKMFA00", "MFHKD00", "MFSHD00", "MFZSD00", "MFDSY00",
-        "MFDMB00", "MFDKW00", "MFDKF00", "MFDMM00", "MFDCL00"
-    ]),
-    ("Europe", [
-        "MFAGD00", "MFDBD00", "MFGBD00", "MFMLD00", "MFPRD00",
-        "MFRDD00", "MFDAN00", "MFDGT00", "MFDHB00", "MFDIS00",
-        "MFDLP00", "MFDNV00", "MFDPT00", "MFLIS00", "MFLOM00"
-    ]),
-    ("Americas", [
-        "MFHOD00", "MFNYD00", "MFLAD00", "MFNOD00", "MFPAD00",
-        "MFSED00", "MFVAD00", "MFBAD00", "MFCRD00", "MFSAD00",
-        "AMFVA00", "AMFCA00", "AMFGY00", "AMFLB00", "AMFMT00",
-        "AMFSF00", "AMFMO00"
-    ])
-]
-
-TAB1_COLUMN_ORDER = [
-    "AMFSA00", "MFSPD00", "PPXDK00", "PUAFT00", "AAXYO00",
-    "PUMFD00", "MFRDD00", "PUABC00", "PUAFN00", "AARTG00",
-    "MFSAD00", "AAXWO00", "MFZSD00", "BFDZA00", "MGZSD00",
-    "MFHKD00", "PUAER00", "AAXYQ00", "MFSKD00", "PUAGQ00",
-    "AAXYS00", "MFSHD00", "AARKD00", "AAXYR00", "MFGBD00",
-    "AAKAB00", "AARSU00", "MFNOD00", "AAGQE00", "AAWYA00",
-    "AMFFA00", "MFFJD00", "PUAXP00", "AAXYP00"
-]
-
-FUEL_TYPE_MAPPING = {
-    "MLBSO00": "MEOH-SG",
-    "LNBSF00": "LNG-SG"
-}
-
-# --------------------------
-# 数据处理工具类
-# --------------------------
 class BunkerDataProcessor:
     """数据处理工具类"""
     @staticmethod
@@ -141,48 +81,6 @@ class BunkerDataProcessor:
         combined = pd.concat([existing_df, new_df])
         return BunkerDataProcessor.clean_dataframe(combined), True
 
-    @staticmethod
-    def clean_dataframe_type(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
-        if df.empty:
-            return df
-
-        # 统一日期格式（增强处理）
-        if 'Date' in df.columns:
-            # 先转换为datetime类型
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            # 过滤无效日期
-            df = df[df['Date'].notna()]
-            # 转换为date类型
-            df['Date'] = df['Date'].dt.date
-
-        # 按数据类型处理列顺序
-        if data_type == "bunker":
-            all_ports = [PORT_CODE_MAPPING.get(code, code) for code in TAB1_COLUMN_ORDER if code in df.columns]
-            ordered_columns = ['Date'] + all_ports
-            df = df.reindex(columns=ordered_columns, fill_value=pd.NA)
-        elif data_type == "regional":
-            ordered_columns = ['Date']
-            for _, codes in REGION_CODE_ORDER:
-                ordered_columns.extend([PORT_CODE_MAPPING[code] for code in codes if code in df.columns])
-            df = df.reindex(columns=ordered_columns, fill_value=pd.NA)
-        elif data_type == "fuel":
-            ordered_columns = ['Date'] + list(FUEL_TYPE_MAPPING.values())
-            df = df.rename(columns=FUEL_TYPE_MAPPING)
-            df = df.reindex(columns=ordered_columns, fill_value=pd.NA)
-
-        # 去重排序
-        df = df.drop_duplicates()
-        df = df.sort_values('Date', ascending=True)
-        return df.reset_index(drop=True)
-
-    @staticmethod
-    def merge_data_type(existing_df: pd.DataFrame, new_df: pd.DataFrame, data_type: str) -> pd.DataFrame:
-        combined = pd.concat([existing_df, new_df])
-        return BunkerDataProcessor.clean_dataframe_type(combined, data_type)
-
-# --------------------------
-# GitHub数据管理器
-# --------------------------
 class GitHubDataManager:
     def __init__(self, token: str, repo_name: str):
         self.token = token
@@ -216,9 +114,6 @@ class GitHubDataManager:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
 
-# --------------------------
-# PDF数据提取器
-# --------------------------
 class EnhancedBunkerPriceExtractor:
     """增强版PDF数据提取器"""
     
@@ -293,16 +188,6 @@ class EnhancedBunkerPriceExtractor:
             logger.warning(f"页面坐标定位失败: {config}")
             return None
         return coords
-
-    def _extract_text_from_area(self, page, coords: Dict) -> str:
-        """从指定区域提取文本"""
-        rect = fitz.Rect(
-            coords['left_x'],
-            min(coords['start_y'], coords['end_y']),
-            coords['right_x'],
-            max(coords['start_y'], coords['end_y'])
-        )
-        return page.get_text("text", clip=rect)
 
     def _process_page_1(self, page) -> Optional[pd.DataFrame]:
         """处理油价页面"""
@@ -385,6 +270,15 @@ class EnhancedBunkerPriceExtractor:
                 data[code] = [float(value)]
         return pd.DataFrame(data) if len(data) > 1 else None
 
+    def _extract_text_from_area(self, page, coords: Dict) -> str:
+        """从指定区域提取文本"""
+        rect = fitz.Rect(
+            coords['left_x'],
+            min(coords['start_y'], coords['end_y']),
+            coords['right_x'],
+            max(coords['start_y'], coords['end_y'])
+        )
+        return page.get_text("text", clip=rect)
     def _extract_date(self, text: str) -> Optional[datetime.date]:
         """从文本中提取日期"""
         date_pattern = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
@@ -417,6 +311,7 @@ class EnhancedBunkerPriceExtractor:
             else:
                 combined_df = BunkerDataProcessor.clean_dataframe(new_df)
             # 按REGION_PORTS的顺序排列列
+             # 按数据类型排列列
             if "Bunker" in sheet_name:
                 ordered_columns = ['Date'] + [port for region in REGION_PORTS.values() 
                                             for port in region if port in combined_df.columns]
@@ -469,7 +364,7 @@ def show_status(message: str, message_type: str = "success", duration: int = 3):
     time.sleep(duration)
 
 def generate_excel_download(df: pd.DataFrame) -> bytes:
-    """生成Excel文件字节流（添加空数据校验)"""
+    """生成Excel文件字节流（添加空数据校验）"""
     if df.empty:
         raise ValueError("无法导出空数据集")
     
