@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 # --------------------------
 # 常量定义
 # --------------------------
-# 港口代码映射
 PORT_CODE_MAPPING = {
     # Asia Pacific/Middle East
     "MFSPD00": "Singapore", "MFFJD00": "Fujairah", "MFJPD00": "Japan", "BAMFB00": "West Japan",
@@ -47,7 +46,6 @@ PORT_CODE_MAPPING = {
     "AMFMO00": "Montreal*"
 }
 
-# 页面显示顺序
 TAB1_COLUMN_ORDER = [
     "AMFSA00", "MFSPD00", "PPXDK00", "PUAFT00", "AAXYO00", "PUMFD00", "MFRDD00", "PUABC00", "PUAFN00",
     "AARTG00", "MFSAD00", "AAXWO00", "MFZSD00", "BFDZA00", "MGZSD00", "MFHKD00", "PUAER00", "AAXYQ00",
@@ -71,32 +69,29 @@ REGION_ORDER = {
     ]
 }
 COMPARE_PORTS = ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"]
-
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
 class BunkerDataProcessor:
     @staticmethod
     def format_date(date_series: pd.Series) -> pd.Series:
-        return pd.to_datetime(date_series, errors='coerce').dt.date
+        try:
+            return pd.to_datetime(date_series, errors='coerce').dt.date
+        except Exception as e:
+            logger.error(f"日期格式化失败: {str(e)}")
+            return pd.Series([pd.NaT]*len(date_series)).dt.date
 
     @staticmethod
     def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        if 'Date' in df.columns:
-            df['Date'] = BunkerDataProcessor.format_date(df['Date'])
-            df = df.dropna(subset=['Date'])
-        df = df.drop_duplicates()
-        if not df.empty:
-            df = df.sort_values('Date', ascending=False).drop_duplicates(subset='Date', keep='first')
-        return df.sort_values('Date', ascending=True).reset_index(drop=True)
-
-    @staticmethod
-    def merge_data(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
-        existing_df = BunkerDataProcessor.clean_dataframe(existing_df)
-        new_df = BunkerDataProcessor.clean_dataframe(new_df)
-        if existing_df.empty:
-            return new_df, True
-        combined = pd.concat([existing_df, new_df])
-        return BunkerDataProcessor.clean_dataframe(combined), True
+        try:
+            if 'Date' in df.columns:
+                df['Date'] = BunkerDataProcessor.format_date(df['Date'])
+                df = df.dropna(subset=['Date'])
+                df = df.sort_values('Date', ascending=False)
+                df = df.drop_duplicates(subset='Date', keep='first')
+            return df.sort_values('Date', ascending=True).reset_index(drop=True)
+        except Exception as e:
+            logger.error(f"数据清理失败: {str(e)}")
+            return pd.DataFrame()
 
 class GitHubDataManager:
     def __init__(self, token: str, repo_name: str):
@@ -104,26 +99,50 @@ class GitHubDataManager:
         self.repo_name = repo_name
         self.g = Github(self.token)
         self.repo = self.g.get_repo(self.repo_name)
+        self.max_retries = 3
     
     def read_excel(self, file_path: str) -> Tuple[pd.DataFrame, bool]:
-        try:
-            contents = self.repo.get_contents(file_path)
-            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), sheet_name=0), True
-        except Exception as e:
-            return pd.DataFrame(), False
+        for _ in range(self.max_retries):
+            try:
+                contents = self.repo.get_contents(file_path)
+                df = pd.read_excel(BytesIO(base64.b64decode(contents.content)), 
+                                 engine='openpyxl',
+                                 sheet_name=0)
+                return BunkerDataProcessor.clean_dataframe(df), True
+            except Exception as e:
+                logger.warning(f"读取重试中... ({str(e)})")
+                time.sleep(1)
+        return pd.DataFrame(), False
     
     def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
         try:
+            # 确保列顺序稳定
+            if "bunker" in file_path:
+                ordered_columns = ['Date'] + [
+                    col for region in REGION_ORDER.values() for col in region
+                    if col in df.columns
+                ]
+                df = df.reindex(columns=ordered_columns)
+            else:
+                df = df.reindex(columns=['Date'] + FUEL_TYPES)
+
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
             content = output.getvalue()
-            try:
-                contents = self.repo.get_contents(file_path)
-                self.repo.update_file(contents.path, commit_msg, content, contents.sha)
-            except:
-                self.repo.create_file(file_path, commit_msg, content)
-            return True
+            
+            for _ in range(self.max_retries):
+                try:
+                    contents = self.repo.get_contents(file_path)
+                    self.repo.update_file(contents.path, commit_msg, content, contents.sha)
+                    return True
+                except Exception as e:
+                    if "404" in str(e):
+                        self.repo.create_file(file_path, commit_msg, content)
+                        return True
+                    logger.warning(f"保存重试中... ({str(e)})")
+                    time.sleep(1)
+            return False
         except Exception as e:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
@@ -139,94 +158,99 @@ class EnhancedBunkerPriceExtractor:
             doc = fitz.open(self.pdf_path)
             result = {'bunker': 0, 'fuel': 0}
             
-            bunker_df = self._process_page_1(doc[0])
-            if bunker_df is not None:
-                success = self._save_data(bunker_df, self.bunker_path, "BunkerPrices")
-                result['bunker'] = 1 if success else 0
+            # 处理第一页
+            if len(doc) >= 1:
+                bunker_df = self._process_page_1(doc[0])
+                if not bunker_df.empty:
+                    if self._save_data(bunker_df, self.bunker_path, "BunkerPrices"):
+                        result['bunker'] = 1
 
-            fuel_df = self._process_page_2(doc[1])
-            if fuel_df is not None:
-                success = self._save_data(fuel_df, self.fuel_path, "FuelPrices")
-                result['fuel'] = 1 if success else 0
+            # 处理第二页
+            if len(doc) >= 2:
+                fuel_df = self._process_page_2(doc[1])
+                if not fuel_df.empty:
+                    if self._save_data(fuel_df, self.fuel_path, "FuelPrices"):
+                        result['fuel'] = 1
 
             doc.close()
             return result
         except Exception as e:
             logger.error(f"PDF处理失败: {str(e)}")
             return {'bunker': 0, 'fuel': 0}
+        finally:
+            if os.path.exists(self.pdf_path):
+                os.remove(self.pdf_path)
 
     def _get_page_coordinates(self, page, config: Dict) -> Optional[Dict]:
         blocks = page.get_text("blocks")
-        coords = {'start_y': None, 'end_y': None, 'left_x': 0, 'right_x': page.rect.width}
+        coords = {'start_y': None, 'end_y': None}
         for block in blocks:
             text = block[4].strip()
-            if config['start_key'] in text and coords['start_y'] is None:
+            if config['start_key'] in text and not coords['start_y']:
                 coords['start_y'] = block[1]
-            if config['end_key'] in text and coords['end_y'] is None:
+            if config['end_key'] in text and not coords['end_y']:
                 coords['end_y'] = block[1]
-            if 'right_boundary' in config and config['right_boundary'] in text:
-                coords['right_x'] = block[0]
-            if 'left_boundary' in config and config['left_boundary'] in text:
-                coords['left_x'] = block[2]
         if None in [coords['start_y'], coords['end_y']]:
             return None
         return coords
 
-    def _process_page_1(self, page) -> Optional[pd.DataFrame]:
-        coord_config = {'start_key': 'Bunkerwire', 'end_key': 'Ex-Wharf', 'right_boundary': 'Marine Fuel (PGB page 30)'}
+    def _process_page_1(self, page) -> pd.DataFrame:
+        coord_config = {'start_key': 'Bunkerwire', 'end_key': 'Ex-Wharf'}
         coords = self._get_page_coordinates(page, coord_config)
         if not coords:
-            return None
+            return pd.DataFrame()
 
         raw_text = self._extract_text_from_area(page, coords)
         date = self._extract_date(raw_text)
         if not date:
-            return None
+            return pd.DataFrame()
 
-        pattern = re.compile(r"([A-Za-z\s\(\)-,]+)\s+([A-Z0-9]+)\s+(NA|\d+\.\d+)\s+(NANA|[+-]?\d+\.\d+)")
-        start_index = raw_text.find("Singapore")
-        if start_index == -1:
-            return None
-
-        relevant_text = raw_text[start_index:].replace("\n", " ").replace("\t", " ")
-        relevant_text = re.sub(r"\s+", " ", relevant_text).strip() 
-        matches = pattern.findall(relevant_text)
+        pattern = re.compile(
+            r"([A-Za-z\s\(\)-,]+)\s+([A-Z0-9]+)\s+(NA|\d+\.\d+)\s+(NANA|[+-]?\d+\.\d+)"
+        )
+        matches = pattern.findall(raw_text.replace("\n", " "))
         if not matches:
-            return None
+            return pd.DataFrame()
 
         data = {'Date': [date]}
         for port, code, price, _ in matches:
             if price != 'NA' and code in PORT_CODE_MAPPING:
-                data[code] = [float(price)]
-        return pd.DataFrame(data) if len(data) > 1 else None
+                try:
+                    data[code] = [float(price)]
+                except ValueError:
+                    continue
+        return pd.DataFrame(data) if len(data) > 1 else pd.DataFrame()
 
-    def _process_page_2(self, page) -> Optional[pd.DataFrame]:
+    def _process_page_2(self, page) -> pd.DataFrame:
         coord_config = {'start_key': 'Alternative marine fuels', 'end_key': 'Arab Gulf'}
         coords = self._get_page_coordinates(page, coord_config)
         if not coords:
-            return None
+            return pd.DataFrame()
 
         raw_text = self._extract_text_from_area(page, coords)
         date = self._extract_date(raw_text)
         if not date:
-            return None
+            return pd.DataFrame()
 
         pattern = re.compile(r"(MLBSO00|LNBSF00)\s+(\d+\.\d+|NA)")
         matches = pattern.findall(raw_text)
         if not matches:
-            return None
+            return pd.DataFrame()
 
         data = {'Date': [date]}
         for code, value in matches:
             if value != 'NA':
-                data[code] = [float(value)]
-        return pd.DataFrame(data) if len(data) > 1 else None
+                try:
+                    data[code] = [float(value)]
+                except ValueError:
+                    continue
+        return pd.DataFrame(data) if len(data) > 1 else pd.DataFrame()
 
     def _extract_text_from_area(self, page, coords: Dict) -> str:
         rect = fitz.Rect(
-            coords['left_x'],
+            0,
             min(coords['start_y'], coords['end_y']),
-            coords['right_x'],
+            page.rect.width,
             max(coords['start_y'], coords['end_y'])
         )
         return page.get_text("text", clip=rect)
@@ -238,7 +262,8 @@ class EnhancedBunkerPriceExtractor:
             return None
         try:
             return datetime.strptime(match.group(1), "%B %d, %Y").date()
-        except ValueError:
+        except Exception as e:
+            logger.error(f"日期解析失败: {str(e)}")
             return None
 
     def _save_data(self, new_df: pd.DataFrame, output_path: str, sheet_name: str) -> bool:
@@ -249,21 +274,16 @@ class EnhancedBunkerPriceExtractor:
             
             existing_df, exists = gh_manager.read_excel(output_path)
             if exists and not existing_df.empty:
+                # 合并并覆盖旧数据
                 combined_df = pd.concat([existing_df, new_df])
+                combined_df = BunkerDataProcessor.clean_dataframe(combined_df)
             else:
                 combined_df = new_df
-            
-            if "Bunker" in sheet_name:
-                ordered_columns = ['Date'] + REGION_ORDER["Asia Pacific/Middle East"] + REGION_ORDER["Europe"] + REGION_ORDER["Americas"]
-                combined_df = combined_df.reindex(columns=ordered_columns, fill_value=pd.NA)
-            else:
-                combined_df = combined_df.reindex(columns=['Date'] + FUEL_TYPES, fill_value=pd.NA)
-            
-            combined_df = BunkerDataProcessor.clean_dataframe(combined_df)
+
             return gh_manager.save_excel(
                 combined_df,
                 output_path,
-                f"Update {sheet_name} at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                f"Update {sheet_name} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
             )
         except Exception as e:
             logger.error(f"保存失败: {str(e)}")
@@ -276,10 +296,7 @@ def load_history_data(path: str) -> pd.DataFrame:
         repo_name = st.secrets.github.repo
         gh_manager = GitHubDataManager(github_token, repo_name)
         df, exists = gh_manager.read_excel(path)
-        if exists:
-            return BunkerDataProcessor.clean_dataframe(df)
-        else:
-            return pd.DataFrame()
+        return df if exists else pd.DataFrame()
     except Exception as e:
         logger.error(f"数据加载失败: {path} - {str(e)}")
         return pd.DataFrame()
@@ -318,30 +335,29 @@ def main_ui():
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(file.getbuffer())
-                        pdf_path = tmp.name
+                        tmp_path = tmp.name
 
-                    extractor = EnhancedBunkerPriceExtractor(pdf_path, BUNKER_PATH, FUEL_PATH)
+                    extractor = EnhancedBunkerPriceExtractor(tmp_path, BUNKER_PATH, FUEL_PATH)
                     result = extractor.process_pdf()
                     
                     if result['bunker'] > 0 or result['fuel'] > 0:
                         st.session_state.processed_files.add(file.name)
                         total_added['bunker'] += result['bunker']
                         total_added['fuel'] += result['fuel']
-                    os.unlink(pdf_path)
                 except Exception as e:
                     error_messages.append(f"❌ {file.name} 处理失败: {str(e)}")
-            status.update(label=f"处理完成！共处理{len(new_files)}个文件", state="complete")
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+            
+            status.update(label=f"处理完成！新增{total_added}条记录", state="complete")
             st.cache_data.clear()
 
     bunker_df = load_history_data(BUNKER_PATH)
     fuel_df = load_history_data(FUEL_PATH)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Bunker Wire", 
-        "区域油价数据", 
-        "油价趋势分析", 
-        "燃料价格分析", 
-        "数据对比"
+        "Bunker Wire", "区域油价数据", "油价趋势分析", "燃料价格分析", "数据对比"
     ])
 
     with tab1:
