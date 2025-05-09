@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from github import Github
 import base64
+import plotly.graph_objects as go
 
 # --------------------------
 # 配置日志系统
