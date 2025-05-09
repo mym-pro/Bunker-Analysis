@@ -10,6 +10,8 @@ from typing import Dict, List, Tuple, Optional
 from github import Github
 import base64
 import plotly.graph_objects as go
+import re
+import os
 
 # --------------------------
 # 配置日志系统
@@ -20,19 +22,43 @@ logger = logging.getLogger(__name__)
 # --------------------------
 # 常量定义
 # --------------------------
+EXTRACTION_CONFIG = {
+    1: [
+        r"(MFSPD00)\s+(\d+\.\d+)", r"(MFFJD00)\s+(\d+\.\d+)", r"(MFJPD00)\s+(\d+\.\d+)", 
+        r"(BAMFB00)\s+(\d+\.\d+)", r"(MFSKD00)\s+(\d+\.\d+)", r"(WKMFA00)\s+(\d+\.\d+)", 
+        r"(MFHKD00)\s+(\d+\.\d+)", r"(MFSHD00)\s+(\d+\.\d+)", r"(MFZSD00)\s+(\d+\.\d+)", 
+        r"(MFDSY00)\s+(\d+\.\d+)", r"(MFDMB00)\s+(\d+\.\d+)", r"(MFDKW00)\s+(\d+\.\d+)", 
+        r"(MFDKF00)\s+(\d+\.\d+)", r"(MFDMM00)\s+(\d+\.\d+)", r"(MFDCL00)\s+(\d+\.\d+)", 
+        r"(MFAGD00)\s+(\d+\.\d+)", r"(MFDBD00)\s+(\d+\.\d+)", r"(MFGBD00)\s+(\d+\.\d+)", 
+        r"(MFMLD00)\s+(\d+\.\d+)", r"(MFPRD00)\s+(\d+\.\d+)", r"(MFRDD00)\s+(\d+\.\d+)", 
+        r"(MFDAN00)\s+(\d+\.\d+)", r"(MFDGT00)\s+(\d+\.\d+)", r"(MFDHB00)\s+(\d+\.\d+)", 
+        r"(MFDIS00)\s+(\d+\.\d+)", r"(MFDLP00)\s+(\d+\.\d+)", r"(MFDNV00)\s+(\d+\.\d+)", 
+        r"(MFDPT00)\s+(\d+\.\d+)", r"(MFLIS00)\s+(\d+\.\d+)", r"(MFLOM00)\s+(\d+\.\d+)", 
+        r"(MFHOD00)\s+(\d+\.\d+)", r"(MFNYD00)\s+(\d+\.\d+)", r"(MFLAD00)\s+(\d+\.\d+)", 
+        r"(MFNOD00)\s+(\d+\.\d+)", r"(MFPAD00)\s+(\d+\.\d+)", r"(MFSED00)\s+(\d+\.\d+)", 
+        r"(MFVAD00)\s+(\d+\.\d+)", r"(MFBAD00)\s+(\d+\.\d+)", r"(MFCRD00)\s+(\d+\.\d+)", 
+        r"(MFSAD00)\s+(\d+\.\d+)", r"(AMFVA00)\s+(\d+\.\d+)", r"(AMFCA00)\s+(\d+\.\d+)", 
+        r"(AMFGY00)\s+(\d+\.\d+)", r"(AMFLB00)\s+(\d+\.\d+)", r"(AMFMT00)\s+(\d+\.\d+)", 
+        r"(AMFSF00)\s+(\d+\.\d+)", r"(AMFMO00)\s+(\d+\.\d+)"
+    ],
+    2: [
+        r"(MLBSO00)\s+(\d+\.\d+)", r"(LNBSF00)\s+(\d+\.\d+)"
+    ]
+}
+
+DATE_PATTERN = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
+
 PORT_CODE_MAPPING = {
     # Asia Pacific/Middle East
     "MFSPD00": "Singapore", "MFFJD00": "Fujairah", "MFJPD00": "Japan", "BAMFB00": "West Japan",
     "MFSKD00": "South Korea", "WKMFA00": "South Korea (West)", "MFHKD00": "Hong Kong",
     "MFSHD00": "Shanghai", "MFZSD00": "Zhoushan", "MFDSY00": "Sydney", "MFDMB00": "Melbourne",
     "MFDKW00": "Kuwait", "MFDKF00": "Khor Fakkan", "MFDMM00": "Mumbai", "MFDCL00": "Colombo",
-    
     # Europe
     "MFAGD00": "Algeciras", "MFDBD00": "Durban", "MFGBD00": "Gibraltar", "MFMLD00": "Malta",
     "MFPRD00": "Piraeus", "MFRDD00": "Rotterdam", "MFDAN00": "Antwerp", "MFDGT00": "Gothenburg",
     "MFDHB00": "Hamburg", "MFDIS00": "Istanbul", "MFDLP00": "Las Palmas", "MFDNV00": "Novorossiisk",
     "MFDPT00": "St. Petersburg", "MFLIS00": "Lisbon", "MFLOM00": "Lome",
-    
     # Americas
     "MFHOD00": "Houston", "MFNYD00": "New York", "MFLAD00": "Los Angeles", "MFNOD00": "New Orleans",
     "MFPAD00": "Philadelphia", "MFSED00": "Seattle", "MFVAD00": "Vancouver", "MFBAD00": "Buenos Aires",
@@ -41,7 +67,6 @@ PORT_CODE_MAPPING = {
     "AMFMO00": "Montreal*"
 }
 
-# 固定列名顺序
 BUNKER_COLUMNS = [
     "Date", "MFSPD00", "MFFJD00", "MFJPD00", "BAMFB00", "MFSKD00", "WKMFA00", "MFHKD00",
     "MFSHD00", "MFZSD00", "MFDSY00", "MFDMB00", "MFDKW00", "MFDKF00", "MFDMM00", "MFDCL00",
@@ -55,35 +80,10 @@ BUNKER_COLUMNS = [
 FUEL_COLUMNS = ["Date", "MLBSO00", "LNBSF00"]
 
 COMPARE_PORT_CODES = ["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]
-FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
-# 定义正则表达式
-BUNKER_EXTRACTION_PATTERNS = [
-    r"(MFSPD00)\s+(\d+\.\d+)", r"(MFFJD00)\s+(\d+\.\d+)", r"(MFJPD00)\s+(\d+\.\d+)", 
-    r"(BAMFB00)\s+(\d+\.\d+)", r"(MFSKD00)\s+(\d+\.\d+)", r"(WKMFA00)\s+(\d+\.\d+)", 
-    r"(MFHKD00)\s+(\d+\.\d+)", r"(MFSHD00)\s+(\d+\.\d+)", r"(MFZSD00)\s+(\d+\.\d+)", 
-    r"(MFDSY00)\s+(\d+\.\d+)", r"(MFDMB00)\s+(\d+\.\d+)", r"(MFDKW00)\s+(\d+\.\d+)", 
-    r"(MFDKF00)\s+(\d+\.\d+)", r"(MFDMM00)\s+(\d+\.\d+)", r"(MFDCL00)\s+(\d+\.\d+)", 
-    r"(MFAGD00)\s+(\d+\.\d+)", r"(MFDBD00)\s+(\d+\.\d+)", r"(MFGBD00)\s+(\d+\.\d+)", 
-    r"(MFMLD00)\s+(\d+\.\d+)", r"(MFPRD00)\s+(\d+\.\d+)", r"(MFRDD00)\s+(\d+\.\d+)", 
-    r"(MFDAN00)\s+(\d+\.\d+)", r"(MFDGT00)\s+(\d+\.\d+)", r"(MFDHB00)\s+(\d+\.\d+)", 
-    r"(MFDIS00)\s+(\d+\.\d+)", r"(MFDLP00)\s+(\d+\.\d+)", r"(MFDNV00)\s+(\d+\.\d+)", 
-    r"(MFDPT00)\s+(\d+\.\d+)", r"(MFLIS00)\s+(\d+\.\d+)", r"(MFLOM00)\s+(\d+\.\d+)", 
-    r"(MFHOD00)\s+(\d+\.\d+)", r"(MFNYD00)\s+(\d+\.\d+)", r"(MFLAD00)\s+(\d+\.\d+)", 
-    r"(MFNOD00)\s+(\d+\.\d+)", r"(MFPAD00)\s+(\d+\.\d+)", r"(MFSED00)\s+(\d+\.\d+)", 
-    r"(MFVAD00)\s+(\d+\.\d+)", r"(MFBAD00)\s+(\d+\.\d+)", r"(MFCRD00)\s+(\d+\.\d+)", 
-    r"(MFSAD00)\s+(\d+\.\d+)", r"(AMFVA00)\s+(\d+\.\d+)", r"(AMFCA00)\s+(\d+\.\d+)", 
-    r"(AMFGY00)\s+(\d+\.\d+)", r"(AMFLB00)\s+(\d+\.\d+)", r"(AMFMT00)\s+(\d+\.\d+)", 
-    r"(AMFSF00)\s+(\d+\.\d+)", r"(AMFMO00)\s+(\d+\.\d+)"
-]
-
-FUEL_EXTRACTION_PATTERNS = [
-    r"(MLBSO00)\s+(\d+\.\d+)", r"(LNBSF00)\s+(\d+\.\d+)"
-]
-
-DATE_PATTERN = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
-
-
+# --------------------------
+# 数据处理类
+# --------------------------
 class BunkerDataProcessor:
     @staticmethod
     def format_date(date_series: pd.Series) -> pd.Series:
@@ -107,7 +107,9 @@ class BunkerDataProcessor:
         combined = pd.concat([existing_df, new_df])
         return BunkerDataProcessor.clean_dataframe(combined), True
 
-
+# --------------------------
+# GitHub 数据管理类
+# --------------------------
 class GitHubDataManager:
     def __init__(self, token: str, repo_name: str):
         self.token = token
@@ -138,7 +140,9 @@ class GitHubDataManager:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
 
-
+# --------------------------
+# PDF 数据提取类
+# --------------------------
 class EnhancedBunkerPriceExtractor:
     def __init__(self, pdf_path: str, bunker_path: str, fuel_path: str):
         self.pdf_path = pdf_path
@@ -180,7 +184,7 @@ class EnhancedBunkerPriceExtractor:
         data = {col: [None] for col in BUNKER_COLUMNS}
         data['Date'] = [date]
 
-        for pattern in BUNKER_EXTRACTION_PATTERNS:
+        for pattern in EXTRACTION_CONFIG[1]:
             matches = re.findall(pattern, text)
             for match in matches:
                 code, value = match
@@ -202,7 +206,7 @@ class EnhancedBunkerPriceExtractor:
         data = {col: [None] for col in FUEL_COLUMNS}
         data['Date'] = [date]
 
-        for pattern in FUEL_EXTRACTION_PATTERNS:
+        for pattern in EXTRACTION_CONFIG[2]:
             matches = re.findall(pattern, text)
             for match in matches:
                 code, value = match
@@ -237,34 +241,9 @@ class EnhancedBunkerPriceExtractor:
             logger.error(f"保存失败: {str(e)}")
             return False
 
-
-@st.cache_data(ttl=3600, show_spinner="加载历史数据...")
-def load_history_data(path: str, columns: List[str]) -> pd.DataFrame:
-    try:
-        github_token = st.secrets.github.token
-        repo_name = st.secrets.github.repo
-        gh_manager = GitHubDataManager(github_token, repo_name)
-        df, exists = gh_manager.read_excel(path)
-        if exists:
-            df = BunkerDataProcessor.clean_dataframe(df)
-            # 确保列名顺序固定
-            df = df.reindex(columns=columns)
-            return df
-        else:
-            return pd.DataFrame(columns=columns)
-    except Exception as e:
-        logger.error(f"数据加载失败: {path} - {str(e)}")
-        return pd.DataFrame(columns=columns)
-
-
-def generate_excel_download(df: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False)
-    output.seek(0)
-    return output.getvalue()
-
-
+# --------------------------
+# Streamlit 界面
+# --------------------------
 def main_ui():
     st.set_page_config(page_title="船燃价格分析系统", layout="wide")
     st.title("Mariners' Bunker Price Analysis System")
@@ -395,7 +374,7 @@ def main_ui():
     with tab4:
         if not fuel_df.empty:
             st.subheader("替代燃料价格趋势")
-            fuel_cols = ['Date'] + [col for col in FUEL_TYPES if col in fuel_df.columns]
+            fuel_cols = ['Date'] + [col for col in FUEL_COLUMNS if col in fuel_df.columns]
             ordered_fuel_df = fuel_df[fuel_cols]
             
             st.dataframe(
@@ -404,7 +383,7 @@ def main_ui():
             )
             
             fig = go.Figure()
-            for fuel_type in FUEL_TYPES:
+            for fuel_type in FUEL_COLUMNS:
                 if fuel_type in fuel_df.columns:
                     fig.add_trace(go.Scatter(
                         x=fuel_df['Date'],
@@ -455,8 +434,35 @@ def main_ui():
                 else:
                     st.warning("未找到选定日期的数据。")
         else:
-            st.warning("暂无油价数据可供对比。")
+             st.warning("暂无油价数据可供对比。")
+# --------------------------
+# 辅助函数
+# --------------------------
+def generate_excel_download(df: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
+    output.seek(0)
+    return output.getvalue()
 
+def load_history_data(path: str, columns: List[str]) -> pd.DataFrame:
+    try:
+        github_token = st.secrets.github.token
+        repo_name = st.secrets.github.repo
+        gh_manager = GitHubDataManager(github_token, repo_name)
+        df, exists = gh_manager.read_excel(path)
+        if exists:
+            df = BunkerDataProcessor.clean_dataframe(df)
+            df = df.reindex(columns=columns)
+            return df
+        else:
+            return pd.DataFrame(columns=columns)
+    except Exception as e:
+        logger.error(f"数据加载失败: {path} - {str(e)}")
+        return pd.DataFrame(columns=columns)
 
+# --------------------------
+# 主程序入口
+# --------------------------
 if __name__ == "__main__":
     main_ui()
