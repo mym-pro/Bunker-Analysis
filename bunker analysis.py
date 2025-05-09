@@ -169,7 +169,6 @@ class EnhancedBunkerPriceExtractor:
         if not matches:
             return None
 
-        # 初始化所有需要的列
         all_columns = ['Date'] + [col for region in REGION_ORDER.values() for col in region]
         data = {col: [None] for col in all_columns}
         data['Date'] = [date]
@@ -279,21 +278,12 @@ def load_history_data(path: str) -> pd.DataFrame:
         gh_manager = GitHubDataManager(github_token, repo_name)
         df, exists = gh_manager.read_excel(path)
         if exists:
-            # 确保所有需要的列都存在
-            all_columns = ['Date'] + [col for region in REGION_ORDER.values() for col in region]
-            df = ensure_columns(df, all_columns)
             return BunkerDataProcessor.clean_dataframe(df)
         else:
             return pd.DataFrame()
     except Exception as e:
         logger.error(f"数据加载失败: {path} - {str(e)}")
         return pd.DataFrame()
-
-def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    missing_columns = [col for col in columns if col not in df.columns]
-    for col in missing_columns:
-        df[col] = pd.NA
-    return df
 
 def generate_excel_download(df: pd.DataFrame) -> bytes:
     output = BytesIO()
@@ -381,37 +371,33 @@ def main_ui():
     with tab2:
         if not bunker_df.empty:
             st.subheader("区域油价数据（最新十日）")
-            region_order = []
             for region in ["Asia Pacific/Middle East", "Europe", "Americas"]:
-                region_order.extend(REGION_ORDER[region])
-            
-            # 确保所有需要的列都存在
-            bunker_df = ensure_columns(bunker_df, region_order)
-            
-            df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
-            df_display = df_display[['Date'] + region_order]
-            df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
-            st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
-            
-            st.subheader("数据下载")
-            col1, col2 = st.columns(2)
-            with col1:
-                selected_date = st.selectbox("选择日期（区域数据）", options=df_display['Date'].astype(str).unique())
-                if selected_date:
-                    daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date][['Date'] + region_order]
+                st.subheader(f"{region} 油价数据")
+                region_ports = REGION_ORDER[region]
+                df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
+                df_display = df_display[['Date'] + region_ports]
+                df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
+                st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
+                
+                st.subheader(f"{region} 数据下载")
+                col1, col2 = st.columns(2)
+                with col1:
+                    selected_date = st.selectbox(f"选择日期（{region}）", options=df_display['Date'].astype(str).unique())
+                    if selected_date:
+                        daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date][['Date'] + region_ports]
+                        st.download_button(
+                            label=f"下载当日数据（{region}）",
+                            data=generate_excel_download(daily_data),
+                            file_name=f"{region.lower().replace(' ', '_')}_{selected_date}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                with col2:
                     st.download_button(
-                        label="下载当日数据",
-                        data=generate_excel_download(daily_data),
-                        file_name=f"regional_{selected_date}.xlsx",
+                        label=f"下载完整数据（{region}）",
+                        data=generate_excel_download(bunker_df[['Date'] + region_ports]),
+                        file_name=f"{region.lower().replace(' ', '_')}_full.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-            with col2:
-                st.download_button(
-                    label="下载完整数据",
-                    data=generate_excel_download(bunker_df[['Date'] + region_order]),
-                    file_name="regional_full.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
         else:
             st.warning("暂无数据")
 
