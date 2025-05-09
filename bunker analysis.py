@@ -1,13 +1,9 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import pandas as pd
-import os
-import re
 import logging
 import tempfile
 from pathlib import Path
-import plotly.express as px
-import plotly.graph_objects as go
 from io import BytesIO
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -60,6 +56,33 @@ FUEL_COLUMNS = ["Date", "MLBSO00", "LNBSF00"]
 COMPARE_PORT_CODES = ["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
+# 定义正则表达式
+BUNKER_EXTRACTION_PATTERNS = [
+    r"(MFSPD00)\s+(\d+\.\d+)", r"(MFFJD00)\s+(\d+\.\d+)", r"(MFJPD00)\s+(\d+\.\d+)", 
+    r"(BAMFB00)\s+(\d+\.\d+)", r"(MFSKD00)\s+(\d+\.\d+)", r"(WKMFA00)\s+(\d+\.\d+)", 
+    r"(MFHKD00)\s+(\d+\.\d+)", r"(MFSHD00)\s+(\d+\.\d+)", r"(MFZSD00)\s+(\d+\.\d+)", 
+    r"(MFDSY00)\s+(\d+\.\d+)", r"(MFDMB00)\s+(\d+\.\d+)", r"(MFDKW00)\s+(\d+\.\d+)", 
+    r"(MFDKF00)\s+(\d+\.\d+)", r"(MFDMM00)\s+(\d+\.\d+)", r"(MFDCL00)\s+(\d+\.\d+)", 
+    r"(MFAGD00)\s+(\d+\.\d+)", r"(MFDBD00)\s+(\d+\.\d+)", r"(MFGBD00)\s+(\d+\.\d+)", 
+    r"(MFMLD00)\s+(\d+\.\d+)", r"(MFPRD00)\s+(\d+\.\d+)", r"(MFRDD00)\s+(\d+\.\d+)", 
+    r"(MFDAN00)\s+(\d+\.\d+)", r"(MFDGT00)\s+(\d+\.\d+)", r"(MFDHB00)\s+(\d+\.\d+)", 
+    r"(MFDIS00)\s+(\d+\.\d+)", r"(MFDLP00)\s+(\d+\.\d+)", r"(MFDNV00)\s+(\d+\.\d+)", 
+    r"(MFDPT00)\s+(\d+\.\d+)", r"(MFLIS00)\s+(\d+\.\d+)", r"(MFLOM00)\s+(\d+\.\d+)", 
+    r"(MFHOD00)\s+(\d+\.\d+)", r"(MFNYD00)\s+(\d+\.\d+)", r"(MFLAD00)\s+(\d+\.\d+)", 
+    r"(MFNOD00)\s+(\d+\.\d+)", r"(MFPAD00)\s+(\d+\.\d+)", r"(MFSED00)\s+(\d+\.\d+)", 
+    r"(MFVAD00)\s+(\d+\.\d+)", r"(MFBAD00)\s+(\d+\.\d+)", r"(MFCRD00)\s+(\d+\.\d+)", 
+    r"(MFSAD00)\s+(\d+\.\d+)", r"(AMFVA00)\s+(\d+\.\d+)", r"(AMFCA00)\s+(\d+\.\d+)", 
+    r"(AMFGY00)\s+(\d+\.\d+)", r"(AMFLB00)\s+(\d+\.\d+)", r"(AMFMT00)\s+(\d+\.\d+)", 
+    r"(AMFSF00)\s+(\d+\.\d+)", r"(AMFMO00)\s+(\d+\.\d+)"
+]
+
+FUEL_EXTRACTION_PATTERNS = [
+    r"(MLBSO00)\s+(\d+\.\d+)", r"(LNBSF00)\s+(\d+\.\d+)"
+]
+
+DATE_PATTERN = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
+
+
 class BunkerDataProcessor:
     @staticmethod
     def format_date(date_series: pd.Series) -> pd.Series:
@@ -82,6 +105,7 @@ class BunkerDataProcessor:
             return new_df, True
         combined = pd.concat([existing_df, new_df])
         return BunkerDataProcessor.clean_dataframe(combined), True
+
 
 class GitHubDataManager:
     def __init__(self, token: str, repo_name: str):
@@ -113,6 +137,7 @@ class GitHubDataManager:
             logger.error(f"GitHub保存失败: {str(e)}")
             return False
 
+
 class EnhancedBunkerPriceExtractor:
     def __init__(self, pdf_path: str, bunker_path: str, fuel_path: str):
         self.pdf_path = pdf_path
@@ -143,97 +168,47 @@ class EnhancedBunkerPriceExtractor:
             return {'bunker': 0, 'fuel': 0}
 
     def _process_page_1(self, page) -> Optional[pd.DataFrame]:
-        coord_config = {'start_key': 'Bunkerwire', 'end_key': 'Ex-Wharf'}
-        coords = self._get_page_coordinates(page, coord_config)
-        if not coords:
+        text = page.get_text().strip()
+        date_match = re.search(DATE_PATTERN, text)
+        if date_match:
+            date_str = date_match.group(1)
+            date = datetime.strptime(date_str, "%B %d, %Y").date()
+        else:
             return None
 
-        raw_text = self._extract_text_from_area(page, coords)
-        date = self._extract_date(raw_text)
-        if not date:
-            return None
-
-        pattern = re.compile(r"([A-Za-z\s\(\)-,]+)\s+([A-Z0-9]+)\s+(NA|\d+\.\d+)\s+(NANA|[+-]?\d+\.\d+)")
-        matches = pattern.findall(raw_text.replace("\n", " "))
-        if not matches:
-            return None
-
-        # 初始化数据字典，所有列名都初始化为 None
         data = {col: [None] for col in BUNKER_COLUMNS}
         data['Date'] = [date]
 
-        for port, code, price, _ in matches:
-            if price != 'NA' and code in PORT_CODE_MAPPING:
-                try:
-                    data[code] = [float(price)]
-                except ValueError:
-                    continue
+        for pattern in BUNKER_EXTRACTION_PATTERNS:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                code, value = match
+                if code in PORT_CODE_MAPPING:
+                    data[code] = [float(value)]
 
         df = pd.DataFrame(data)
         return df
 
     def _process_page_2(self, page) -> Optional[pd.DataFrame]:
-        coord_config = {'start_key': 'Alternative marine fuels', 'end_key': 'Arab Gulf'}
-        coords = self._get_page_coordinates(page, coord_config)
-        if not coords:
+        text = page.get_text().strip()
+        date_match = re.search(DATE_PATTERN, text)
+        if date_match:
+            date_str = date_match.group(1)
+            date = datetime.strptime(date_str, "%B %d, %Y").date()
+        else:
             return None
 
-        raw_text = self._extract_text_from_area(page, coords)
-        date = self._extract_date(raw_text)
-        if not date:
-            return None
-
-        pattern = re.compile(r"(MLBSO00|LNBSF00)\s+(\d+\.\d+|NA)")
-        matches = pattern.findall(raw_text)
-        if not matches:
-            return None
-
-        # 初始化数据字典，所有列名都初始化为 None
         data = {col: [None] for col in FUEL_COLUMNS}
         data['Date'] = [date]
 
-        for code, value in matches:
-            if value != 'NA':
-                try:
-                    data[code] = [float(value)]
-                except ValueError:
-                    continue
+        for pattern in FUEL_EXTRACTION_PATTERNS:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                code, value = match
+                data[code] = [float(value)]
 
         df = pd.DataFrame(data)
         return df
-
-    def _get_page_coordinates(self, page, config: Dict) -> Optional[Dict]:
-        blocks = page.get_text("blocks")
-        coords = {'start_y': None, 'end_y': None}
-        for block in blocks:
-            text = block[4].strip()
-            if config['start_key'] in text and not coords['start_y']:
-                coords['start_y'] = block[1]
-            if config['end_key'] in text and not coords['end_y']:
-                coords['end_y'] = block[1]
-        if None in [coords['start_y'], coords['end_y']]:
-            return None
-        return coords
-
-    def _extract_text_from_area(self, page, coords: Dict) -> str:
-        rect = fitz.Rect(
-            0,
-            min(coords['start_y'], coords['end_y']),
-            page.rect.width,
-            max(coords['start_y'], coords['end_y'])
-        )
-        return page.get_text("text", clip=rect)
-
-    def _extract_date(self, text: str) -> Optional[datetime.date]:
-        date_pattern = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
-        match = re.search(date_pattern, text)
-        if not match:
-            return None
-        try:
-            return datetime.strptime(match.group(1), "%B %d, %Y").date()
-        except Exception as e:
-            logger.error(f"日期解析失败: {str(e)}")
-            return None
 
     def _save_data(self, new_df: pd.DataFrame, output_path: str, sheet_name: str) -> bool:
         try:
@@ -261,6 +236,7 @@ class EnhancedBunkerPriceExtractor:
             logger.error(f"保存失败: {str(e)}")
             return False
 
+
 @st.cache_data(ttl=3600, show_spinner="加载历史数据...")
 def load_history_data(path: str, columns: List[str]) -> pd.DataFrame:
     try:
@@ -279,12 +255,14 @@ def load_history_data(path: str, columns: List[str]) -> pd.DataFrame:
         logger.error(f"数据加载失败: {path} - {str(e)}")
         return pd.DataFrame(columns=columns)
 
+
 def generate_excel_download(df: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     output.seek(0)
     return output.getvalue()
+
 
 def main_ui():
     st.set_page_config(page_title="船燃价格分析系统", layout="wide")
@@ -477,7 +455,7 @@ def main_ui():
                     st.warning("未找到选定日期的数据。")
         else:
             st.warning("暂无油价数据可供对比。")
-            st.warning("暂无油价数据可供对比。")
+
 
 if __name__ == "__main__":
     main_ui()
