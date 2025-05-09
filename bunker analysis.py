@@ -5,7 +5,6 @@ import os
 import re
 import logging
 import tempfile
-import time
 from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
@@ -14,7 +13,6 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from github import Github
 import base64
-from io import BytesIO
 
 # --------------------------
 # 配置日志系统
@@ -46,28 +44,19 @@ PORT_CODE_MAPPING = {
     "AMFMO00": "Montreal*"
 }
 
-TAB1_COLUMN_ORDER = [
-    "AMFSA00", "MFSPD00", "PPXDK00", "PUAFT00", "AAXYO00", "PUMFD00", "MFRDD00", "PUABC00", "PUAFN00",
-    "AARTG00", "MFSAD00", "AAXWO00", "MFZSD00", "BFDZA00", "MGZSD00", "MFHKD00", "PUAER00", "AAXYQ00",
-    "MFSKD00", "PUAGQ00", "AAXYS00", "MFSHD00", "AARKD00", "AAXYR00", "MFGBD00", "AAKAB00", "AARSU00",
-    "MFNOD00", "AAGQE00", "AAWYA00", "AMFFA00", "MFFJD00", "PUAXP00", "AAXYP00"
+# 固定列名顺序
+BUNKER_COLUMNS = [
+    "Date", "MFSPD00", "MFFJD00", "MFJPD00", "BAMFB00", "MFSKD00", "WKMFA00", "MFHKD00",
+    "MFSHD00", "MFZSD00", "MFDSY00", "MFDMB00", "MFDKW00", "MFDKF00", "MFDMM00", "MFDCL00",
+    "MFAGD00", "MFDBD00", "MFGBD00", "MFMLD00", "MFPRD00", "MFRDD00", "MFDAN00",
+    "MFDGT00", "MFDHB00", "MFDIS00", "MFDLP00", "MFDNV00", "MFDPT00", "MFLIS00", "MFLOM00",
+    "MFHOD00", "MFNYD00", "MFLAD00", "MFNOD00", "MFPAD00", "MFSED00", "MFVAD00",
+    "MFBAD00", "MFCRD00", "MFSAD00", "AMFVA00", "AMFCA00", "AMFGY00", "AMFLB00",
+    "AMFMT00", "AMFSF00", "AMFMO00"
 ]
 
-REGION_ORDER = {
-    "Asia Pacific/Middle East": [
-        "MFSPD00", "MFFJD00", "MFJPD00", "BAMFB00", "MFSKD00", "WKMFA00", "MFHKD00",
-        "MFSHD00", "MFZSD00", "MFDSY00", "MFDMB00", "MFDKW00", "MFDKF00", "MFDMM00", "MFDCL00"
-    ],
-    "Europe": [
-        "MFAGD00", "MFDBD00", "MFGBD00", "MFMLD00", "MFPRD00", "MFRDD00", "MFDAN00",
-        "MFDGT00", "MFDHB00", "MFDIS00", "MFDLP00", "MFDNV00", "MFDPT00", "MFLIS00", "MFLOM00"
-    ],
-    "Americas": [
-        "MFHOD00", "MFNYD00", "MFLAD00", "MFNOD00", "MFPAD00", "MFSED00", "MFVAD00",
-        "MFBAD00", "MFCRD00", "MFSAD00", "AMFVA00", "AMFCA00", "AMFGY00", "AMFLB00",
-        "AMFMT00", "AMFSF00", "AMFMO00"
-    ]
-}
+FUEL_COLUMNS = ["Date", "MLBSO00", "LNBSF00"]
+
 COMPARE_PORTS = ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"]
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
@@ -169,8 +158,8 @@ class EnhancedBunkerPriceExtractor:
         if not matches:
             return None
 
-        all_columns = ['Date'] + [col for region in REGION_ORDER.values() for col in region]
-        data = {col: [None] for col in all_columns}
+        # 初始化数据字典，所有列名都初始化为 None
+        data = {col: [None] for col in BUNKER_COLUMNS}
         data['Date'] = [date]
 
         for port, code, price, _ in matches:
@@ -181,10 +170,7 @@ class EnhancedBunkerPriceExtractor:
                     continue
 
         df = pd.DataFrame(data)
-        if len(df) > 1:
-            logger.debug(f"Extracted DataFrame columns: {df.columns}")
-            return df
-        return None
+        return df
 
     def _process_page_2(self, page) -> Optional[pd.DataFrame]:
         coord_config = {'start_key': 'Alternative marine fuels', 'end_key': 'Arab Gulf'}
@@ -202,14 +188,19 @@ class EnhancedBunkerPriceExtractor:
         if not matches:
             return None
 
-        data = {'Date': [date]}
+        # 初始化数据字典，所有列名都初始化为 None
+        data = {col: [None] for col in FUEL_COLUMNS}
+        data['Date'] = [date]
+
         for code, value in matches:
             if value != 'NA':
                 try:
                     data[code] = [float(value)]
                 except ValueError:
                     continue
-        return pd.DataFrame(data) if len(data) > 1 else None
+
+        df = pd.DataFrame(data)
+        return df
 
     def _get_page_coordinates(self, page, config: Dict) -> Optional[Dict]:
         blocks = page.get_text("blocks")
@@ -271,19 +262,22 @@ class EnhancedBunkerPriceExtractor:
             return False
 
 @st.cache_data(ttl=3600, show_spinner="加载历史数据...")
-def load_history_data(path: str) -> pd.DataFrame:
+def load_history_data(path: str, columns: List[str]) -> pd.DataFrame:
     try:
         github_token = st.secrets.github.token
         repo_name = st.secrets.github.repo
         gh_manager = GitHubDataManager(github_token, repo_name)
         df, exists = gh_manager.read_excel(path)
         if exists:
-            return BunkerDataProcessor.clean_dataframe(df)
+            df = BunkerDataProcessor.clean_dataframe(df)
+            # 确保列名顺序固定
+            df = df.reindex(columns=columns)
+            return df
         else:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=columns)
     except Exception as e:
         logger.error(f"数据加载失败: {path} - {str(e)}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=columns)
 
 def generate_excel_download(df: pd.DataFrame) -> bytes:
     output = BytesIO()
@@ -330,8 +324,8 @@ def main_ui():
             status.update(label="处理完成！", state="complete")
             st.cache_data.clear()
 
-    bunker_df = load_history_data(BUNKER_PATH)
-    fuel_df = load_history_data(FUEL_PATH)
+    bunker_df = load_history_data(BUNKER_PATH, BUNKER_COLUMNS)
+    fuel_df = load_history_data(FUEL_PATH, FUEL_COLUMNS)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Bunker Wire", "区域油价数据", "油价趋势分析", "燃料价格分析", "数据对比"
@@ -341,17 +335,15 @@ def main_ui():
         if not bunker_df.empty:
             st.subheader("Bunker Wire数据（最新十日）")
             df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
-            tab1_columns = [col for col in TAB1_COLUMN_ORDER if col in df_display.columns]
-            df_display = df_display[['Date'] + tab1_columns]
-            df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
-            st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
+            df_display = df_display.set_index("Date")
+            st.dataframe(df_display, use_container_width=True, height=400)
             
             st.subheader("数据下载")
             col1, col2 = st.columns(2)
             with col1:
-                selected_date = st.selectbox("选择日期（Bunker Wire）", options=df_display['Date'].astype(str).unique())
+                selected_date = st.selectbox("选择日期（Bunker Wire）", options=df_display.index.astype(str).unique())
                 if selected_date:
-                    daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date][['Date'] + tab1_columns]
+                    daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date]
                     st.download_button(
                         label="下载当日数据",
                         data=generate_excel_download(daily_data),
@@ -361,7 +353,7 @@ def main_ui():
             with col2:
                 st.download_button(
                     label="下载完整数据",
-                    data=generate_excel_download(bunker_df[['Date'] + tab1_columns]),
+                    data=generate_excel_download(bunker_df),
                     file_name="bunker_wire_full.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
@@ -373,16 +365,16 @@ def main_ui():
             st.subheader("区域油价数据（最新十日）")
             for region in ["Asia Pacific/Middle East", "Europe", "Americas"]:
                 st.subheader(f"{region} 油价数据")
-                region_ports = REGION_ORDER[region]
+                region_ports = [col for col in BUNKER_COLUMNS if col in PORT_CODE_MAPPING]
                 df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
                 df_display = df_display[['Date'] + region_ports]
-                df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
-                st.dataframe(df_display.set_index("Date"), use_container_width=True, height=400)
+                df_display = df_display.set_index("Date")
+                st.dataframe(df_display, use_container_width=True, height=400)
                 
                 st.subheader(f"{region} 数据下载")
                 col1, col2 = st.columns(2)
                 with col1:
-                    selected_date = st.selectbox(f"选择日期（{region}）", options=df_display['Date'].astype(str).unique())
+                    selected_date = st.selectbox(f"选择日期（{region}）", options=df_display.index.astype(str).unique())
                     if selected_date:
                         daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date][['Date'] + region_ports]
                         st.download_button(
