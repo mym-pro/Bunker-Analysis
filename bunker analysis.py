@@ -57,7 +57,7 @@ BUNKER_COLUMNS = [
 
 FUEL_COLUMNS = ["Date", "MLBSO00", "LNBSF00"]
 
-COMPARE_PORTS = ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"]
+COMPARE_PORT_CODES = ["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]
 FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
 class BunkerDataProcessor:
@@ -336,6 +336,7 @@ def main_ui():
             st.subheader("Bunker Wire数据（最新十日）")
             df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
             df_display = df_display.set_index("Date")
+            df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
             st.dataframe(df_display, use_container_width=True, height=400)
             
             st.subheader("数据下载")
@@ -344,6 +345,7 @@ def main_ui():
                 selected_date = st.selectbox("选择日期（Bunker Wire）", options=df_display.index.astype(str).unique())
                 if selected_date:
                     daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date]
+                    daily_data = daily_data.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
                     st.download_button(
                         label="下载当日数据",
                         data=generate_excel_download(daily_data),
@@ -353,7 +355,7 @@ def main_ui():
             with col2:
                 st.download_button(
                     label="下载完整数据",
-                    data=generate_excel_download(bunker_df),
+                    data=generate_excel_download(bunker_df.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)),
                     file_name="bunker_wire_full.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
@@ -369,6 +371,7 @@ def main_ui():
                 df_display = bunker_df.copy().sort_values('Date', ascending=False).head(10)
                 df_display = df_display[['Date'] + region_ports]
                 df_display = df_display.set_index("Date")
+                df_display = df_display.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
                 st.dataframe(df_display, use_container_width=True, height=400)
                 
                 st.subheader(f"{region} 数据下载")
@@ -377,6 +380,7 @@ def main_ui():
                     selected_date = st.selectbox(f"选择日期（{region}）", options=df_display.index.astype(str).unique())
                     if selected_date:
                         daily_data = bunker_df[bunker_df['Date'].astype(str) == selected_date][['Date'] + region_ports]
+                        daily_data = daily_data.rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)
                         st.download_button(
                             label=f"下载当日数据（{region}）",
                             data=generate_excel_download(daily_data),
@@ -386,7 +390,7 @@ def main_ui():
                 with col2:
                     st.download_button(
                         label=f"下载完整数据（{region}）",
-                        data=generate_excel_download(bunker_df[['Date'] + region_ports]),
+                        data=generate_excel_download(bunker_df[['Date'] + region_ports].rename(columns=lambda x: f"{PORT_CODE_MAPPING.get(x, x)} ({x})" if x != "Date" else x)),
                         file_name=f"{region.lower().replace(' ', '_')}_full.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
@@ -398,10 +402,12 @@ def main_ui():
             st.subheader("Multi-Port Trend Comparison")
             col1, col2 = st.columns([3, 1])
             with col1:
+                available_ports = [p for p in bunker_df.columns if p != 'Date']
+                default_ports = [port for port in COMPARE_PORT_CODES if port in available_ports]
                 selected_ports = st.multiselect(
                     "Select Ports for Comparison",
-                    [p for p in bunker_df.columns if p != 'Date'],
-                    default=COMPARE_PORTS[:2]
+                    available_ports,
+                    default=default_ports
                 )
             with col2:
                 selected_year = st.selectbox(
@@ -417,7 +423,7 @@ def main_ui():
                             x=filtered_df['Date'],
                             y=filtered_df[port],
                             mode='lines+markers',
-                            name=port,
+                            name=f"{PORT_CODE_MAPPING.get(port, port)} ({port})",
                             connectgaps=True
                         ))
                 fig.update_layout(
@@ -471,7 +477,7 @@ def main_ui():
                 df2 = bunker_df.loc[bunker_df['Date'].astype(str) == date2]
                 if not df1.empty and not df2.empty:
                     comparison = []
-                    for port in COMPARE_PORTS:
+                    for port in COMPARE_PORT_CODES:
                         if port in df1.columns and port in df2.columns:
                             price1 = df1[port].values[0] if not df1[port].isna().all() else None
                             price2 = df2[port].values[0] if not df2[port].isna().all() else None
@@ -480,7 +486,7 @@ def main_ui():
                             else:
                                 change = None
                             comparison.append({
-                                "Port": port,
+                                "Port": f"{PORT_CODE_MAPPING.get(port, port)} ({port})",
                                 date1: price1,
                                 date2: price2,
                                 "Change (%)": f"{change:.2f}%" if change is not None else "N/A"
