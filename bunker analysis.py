@@ -9,7 +9,7 @@ import tempfile
 from io import BytesIO
 from github import Github
 import base64
-import requests
+import hashlib
 
 # 配置日志
 logging.basicConfig(level=logging.ERROR)
@@ -152,27 +152,47 @@ def main_ui():
 
     # 文件上传模块
     with st.expander("📤 第一步 - 上传PDF文件", expanded=True):
-        uploaded_file = st.file_uploader("选择PDF文件", type=["pdf"])
+        uploaded_files = st.file_uploader("选择PDF文件", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_file:
-        current_file_hash = hash(uploaded_file.getvalue())
-        if 'last_file_hash' not in st.session_state or st.session_state.last_file_hash != current_file_hash:
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
             try:
+                # 检查文件是否为PDF
+                if not uploaded_file.name.endswith('.pdf'):
+                    st.warning(f"文件 {uploaded_file.name} 不是PDF文件，跳过处理。")
+                    continue
+
+                # 检查文件内容是否重复
+                file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+                if 'processed_files' not in st.session_state:
+                    st.session_state.processed_files = set()
+                if file_hash in st.session_state.processed_files:
+                    st.warning(f"文件 {uploaded_file.name} 已处理过，跳过重复文件。")
+                    continue
+                st.session_state.processed_files.add(file_hash)
+
+                # 临时保存文件
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(uploaded_file.getvalue())
                     pdf_path = Path(tmp.name)
 
+                # 提取数据
                 extractor = PDFDataExtractor(pdf_path)
                 extracted_df = extractor.extract_data()
 
+                # 检查日期是否提取成功
+                if extracted_df['Date'].isnull().any():
+                    st.warning(f"文件 {uploaded_file.name} 日期提取失败，跳过处理。")
+                    continue
+
+                # 保存数据
                 saver = GitHubDataSaver(repo_name, file_path, github_token)
                 saver.save_data(extracted_df)
 
-                st.session_state.last_file_hash = current_file_hash
-                st.success("数据提取成功！")
+                st.success(f"文件 {uploaded_file.name} 数据提取成功！")
             except Exception as e:
-                logger.error(f"处理失败: {str(e)}")
-                st.error(f"文件处理错误: {str(e)}")
+                logger.error(f"处理文件 {uploaded_file.name} 时失败: {str(e)}")
+                st.error(f"文件 {uploaded_file.name} 处理错误: {str(e)}")
 
     # 数据展示模块
     with st.expander("📈 第二步 - 数据展示", expanded=True):
@@ -189,12 +209,14 @@ def main_ui():
             st.subheader("最新十条港口数据")
             latest_data = data_df[["Date", "MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]].head(10)
             latest_data_renamed = latest_data.rename(columns=PORT_MAPPING)
+            latest_data_renamed = latest_data_renamed.round(2)  # 保留两位小数
             st.table(latest_data_renamed.set_index("Date"))
 
             # 展示内容二：展示"MLBSO00", "LNBSF00"的最新十条数据
             st.subheader("最新十条 MLBSO00 和 LNBSF00 数据")
             latest_data_mlbs = data_df[["Date", "MLBSO00", "LNBSF00"]].head(10)
             latest_data_mlbs = latest_data_mlbs.sort_values(by='Date', ascending=True)
+            latest_data_mlbs = latest_data_mlbs.round(3)  # 保留三位小数
             st.table(latest_data_mlbs.set_index("Date"))
 
             # 展示内容三：选定两个日期进行比较
@@ -209,7 +231,7 @@ def main_ui():
                     "港口": ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"],
                     f"{date1}": data1.iloc[0].values,
                     f"{date2}": data2.iloc[0].values,
-                    "环比变化 (%)": ((data1.iloc[0].values - data2.iloc[0].values) / data2.iloc[0].values * 100).round(0)
+                    "环比变化 (%)": ((data1.iloc[0].values - data2.iloc[0].values) / data2.iloc[0].values * 100).round(2)  # 保留两位小数
                 })
                 st.table(comparison_df.set_index("港口"))
 
