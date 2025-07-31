@@ -1,51 +1,38 @@
 import streamlit as st
+import fitz  # PyMuPDF
 import pandas as pd
-import plotly.graph_objects as go
-from datetime import datetime
 import logging
+from io import BytesIO
+from datetime import datetime
 from github import Github
 import base64
-from io import BytesIO
+import re
+from typing import Optional
 
-# 配置日志系统
+# 配置日志
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# 常量定义
-FUEL_COLUMNS = ["Date", "MLBSO00", "LNBSF00"]
-COMPARE_PORT_CODES = ["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]
-PORT_CODE_MAPPING = {
-    "MFSPD00": "Singapore", "MFRDD00": "Rotterdam", "MFHKD00": "Hong Kong",
-    "MFSAD00": "Santos", "MFZSD00": "Zhoushan"
+# 常量定义 - 只保留核心数据
+EXTRACTION_CONFIG = {
+    1: [
+        r"(MFSPD00)\s+(\d+\.\d+)",  # Singapore
+        r"(MFRDD00)\s+(\d+\.\d+)",  # Rotterdam
+        r"(MFHKD00)\s+(\d+\.\d+)",  # Hong Kong
+        r"(MFSAD00)\s+(\d+\.\d+)",  # Santos
+        r"(MFZSD00)\s+(\d+\.\d+)"   # Zhoushan
+    ],
+    2: [
+        r"(MLBSO00)\s+(\d+\.\d+)",  # Low Sulphur Fuel Oil
+        r"(LNBSF00)\s+(\d+\.\d+)"   # LNG Bunker
+    ]
 }
 
-# 数据处理类
-class BunkerDataProcessor:
-    @staticmethod
-    def format_date(date_series: pd.Series) -> pd.Series:
-        return pd.to_datetime(date_series, errors='coerce').dt.date
+DATE_PATTERN = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
 
-    @staticmethod
-    def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        if 'Date' in df.columns and not df.empty:
-            df['Date'] = BunkerDataProcessor.format_date(df['Date'])
-            df = df.dropna(subset=['Date'])
-            df = df.sort_values('Date', ascending=False)
-            df = df.drop_duplicates(subset='Date', keep='first')
-        return df.sort_values('Date', ascending=True).reset_index(drop=True)
-
-    @staticmethod
-    def merge_data(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
-        if existing_df.empty:
-            return new_df
-        
-        # 检查日期是否已存在
-        new_date = new_df['Date'].iloc[0]
-        if new_date in existing_df['Date'].values:
-            # 覆盖该日期的数据
-            existing_df = existing_df[existing_df['Date'] != new_date]
-        
-        return pd.concat([existing_df, new_df], ignore_index=True)
+# 只保留核心港口和燃料数据
+CORE_PORTS = ["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]
+FUEL_TYPES = ["MLBSO00", "LNBSF00"]
 
 # GitHub 数据管理类
 class GitHubDataManager:
@@ -54,164 +41,197 @@ class GitHubDataManager:
         self.repo_name = repo_name
         self.g = Github(self.token)
         self.repo = self.g.get_repo(self.repo_name)
-
-    @st.cache_data(ttl=3600, show_spinner="从GitHub加载数据...")
+    
+    @st.cache_data(ttl=3600)
     def read_excel(_self, file_path: str) -> pd.DataFrame:
         try:
             contents = _self.repo.get_contents(file_path)
-            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), engine='openpyxl')
-        except Exception as e:
-            logger.warning(f"GitHub读取失败: {str(e)}")
-            return pd.DataFrame(columns=FUEL_COLUMNS)
-
-    def save_excel(self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
+            return pd.read_excel(BytesIO(base64.b64decode(contents.content)), True)
+        except:
+            return pd.DataFrame(), False
+    
+    def save_excel(_self, df: pd.DataFrame, file_path: str, commit_msg: str) -> bool:
         try:
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
             content = output.getvalue()
             
+            st.cache_data.clear()
+            
             try:
-                contents = self.repo.get_contents(file_path)
-                self.repo.update_file(contents.path, commit_msg, base64.b64encode(content).decode(), contents.sha)
-            except Exception:
-                self.repo.create_file(file_path, commit_msg, base64.b64encode(content).decode())
+                contents = _self.repo.get_contents(file_path)
+                _self.repo.update_file(contents.path, commit_msg, base64.b64encode(content).decode(), contents.sha)
+            except:
+                _self.repo.create_file(file_path, commit_msg, base64.b64encode(content).decode())
             return True
         except Exception as e:
-            logger.error(f"GitHub保存失败: {str(e)}")
+            logger.error(f"保存失败: {str(e)}")
             return False
 
-# Streamlit 界面
-def main_ui():
-    st.set_page_config(page_title="船燃价格分析系统", layout="wide")
-    st.title("Mariners' Bunker Price Analysis System")
-
-    FUEL_PATH = "data/fuel_prices.xlsx"
-    BUNKER_PATH = "data/bunker_prices.xlsx"
-
-    # 初始化 GitHub 数据管理器
-    gh_manager = GitHubDataManager(st.secrets.github.token, st.secrets.github.repo)
-
-    # 加载数据
-    fuel_df = gh_manager.read_excel(FUEL_PATH)
-    bunker_df = gh_manager.read_excel(BUNKER_PATH)
-
-    # 燃料价格分析
-    st.subheader("替代燃料价格趋势")
-    
-    if not fuel_df.empty:
-        # 显示最新数据
-        st.dataframe(
-            fuel_df.sort_values('Date', ascending=False).head(10).set_index("Date"),
-            use_container_width=True
+# 高效PDF处理器
+class FastBunkerPriceExtractor:
+    def __init__(self, pdf_bytes: bytes, bunker_path: str, fuel_path: str):
+        self.pdf_bytes = pdf_bytes
+        self.bunker_path = bunker_path
+        self.fuel_path = fuel_path
+        self.gh_manager = GitHubDataManager(
+            st.secrets.github.token, 
+            st.secrets.github.repo
         )
-        
-        # 创建趋势图
-        fig = go.Figure()
-        for fuel_type in FUEL_COLUMNS:
-            if fuel_type != 'Date' and fuel_type in fuel_df.columns:
-                fig.add_trace(go.Scatter(
-                    x=fuel_df['Date'],
-                    y=fuel_df[fuel_type],
-                    name=fuel_type,
-                    mode='lines+markers',
-                    connectgaps=True
-                ))
-        
-        fig.update_layout(
-            title="替代燃料价格趋势",
-            xaxis_title="日期",
-            yaxis_title="价格 (USD)",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("暂无燃料数据可供分析。")
 
-    # 数据对比
-    st.subheader("指定日期港口价格对比")
-    
-    if not bunker_df.empty:
-        # 获取可用日期
-        date_options = bunker_df['Date'].dt.strftime('%Y-%m-%d').unique().tolist()
-        date_options.sort(reverse=True)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            date1 = st.selectbox("选择对比日期1", date_options)
-        with col2:
-            date2 = st.selectbox("选择对比日期2", date_options, index=1 if len(date_options) > 1 else 0)
-        
-        if date1 and date2:
-            df1 = bunker_df[bunker_df['Date'].dt.strftime('%Y-%m-%d') == date1]
-            df2 = bunker_df[bunker_df['Date'].dt.strftime('%Y-%m-%d') == date2]
-            
-            if not df1.empty and not df2.empty:
-                comparison = []
-                for port in COMPARE_PORT_CODES:
-                    if port in df1.columns and port in df2.columns:
-                        price1 = df1[port].values[0]
-                        price2 = df2[port].values[0]
-                        
-                        if pd.notna(price1) and pd.notna(price2):
-                            change = ((price1 - price2) / price2 * 100)
-                            comparison.append({
-                                "港口": f"{PORT_CODE_MAPPING.get(port, port)} ({port})",
-                                date1: price1,
-                                date2: price2,
-                                "变化 (%)": f"{change:.2f}%"
-                            })
+    def process_pdf(self) -> bool:
+        try:
+            with fitz.open(stream=self.pdf_bytes, filetype="pdf") as doc:
+                # 提取港口数据
+                if doc.page_count > 0:
+                    bunker_df = self._process_page(doc[0], is_bunker=True)
+                    if bunker_df is not None:
+                        self._save_data(bunker_df, self.bunker_path)
                 
-                if comparison:
-                    st.dataframe(
-                        pd.DataFrame(comparison).set_index("港口"),
-                        use_container_width=True
-                    )
-                else:
-                    st.warning("未找到选定日期的数据或选定港口的数据不完整。")
-            else:
-                st.warning("未找到选定日期的数据。")
-    else:
-        st.warning("暂无油价数据可供对比。")
+                # 提取燃料数据
+                if doc.page_count > 1:
+                    fuel_df = self._process_page(doc[1], is_bunker=False)
+                    if fuel_df is not None:
+                        self._save_data(fuel_df, self.fuel_path)
+                
+                return True
+        except:
+            return False
 
-    # 文件上传区域
-    with st.expander("📤 上传新数据", expanded=True):
-        uploaded_files = st.file_uploader(
-            "选择Bunkerwire PDF报告（支持多选）",
-            type=["pdf"],
-            accept_multiple_files=True
-        )
-
-    # 文件处理
-    if uploaded_files:
-        with st.status("正在解析文件...", expanded=True) as status:
-            for file in uploaded_files:
-                try:
-                    # 模拟从PDF提取数据的逻辑
-                    new_data = pd.DataFrame({
-                        "Date": [datetime.now().date()],
-                        "MLBSO00": [100.0],
-                        "LNBSF00": [200.0]
-                    })
-                    
-                    # 合并新数据
-                    combined_df = BunkerDataProcessor.merge_data(fuel_df, new_data)
-                    combined_df = BunkerDataProcessor.clean_dataframe(combined_df)
-                    
-                    # 保存到GitHub
-                    if gh_manager.save_excel(
-                        combined_df,
-                        FUEL_PATH,
-                        f"Update fuel prices at {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                    ):
-                        st.toast(f"✅ {file.name} 处理成功")
-                    else:
-                        st.toast(f"⚠️ {file.name} 保存失败")
-                except Exception as e:
-                    st.toast(f"❌ {file.name} 处理失败: {str(e)}")
+    def _process_page(self, page, is_bunker: bool) -> Optional[pd.DataFrame]:
+        text = page.get_text().strip()
+        date_match = re.search(DATE_PATTERN, text)
+        if not date_match:
+            return None
         
-            status.update(label="处理完成！", state="complete")
+        try:
+            date = datetime.strptime(date_match.group(1), "%B %d, %Y").date()
+        except:
+            return None
 
-# 主程序入口
+        # 只提取核心数据
+        data = {'Date': [date]}
+        config = EXTRACTION_CONFIG[1] if is_bunker else EXTRACTION_CONFIG[2]
+        
+        for pattern in config:
+            match = re.search(pattern, text)
+            if match:
+                code, value = match.groups()
+                data[code] = [float(value)]
+        
+        return pd.DataFrame(data)
+
+    def _save_data(self, new_df: pd.DataFrame, output_path: str) -> bool:
+        try:
+            existing_df, exists = self.gh_manager.read_excel(output_path)
+            if exists and not existing_df.empty:
+                # 移除同日期旧数据
+                existing_df = existing_df[existing_df['Date'] != new_df['Date'].iloc[0]]
+                combined_df = pd.concat([existing_df, new_df])
+            else:
+                combined_df = new_df
+            
+            # 按日期排序
+            combined_df['Date'] = pd.to_datetime(combined_df['Date']).dt.date
+            combined_df = combined_df.sort_values('Date', ascending=False)
+            
+            return self.gh_manager.save_excel(
+                combined_df,
+                output_path,
+                f"Update at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+            )
+        except:
+            return False
+
+# 主界面
+def main_ui():
+    st.set_page_config(page_title="船燃价格分析", layout="centered")
+    st.title("船燃价格分析系统")
+    
+    # 文件上传区域
+    uploaded_file = st.file_uploader("上传Bunkerwire PDF报告", type="pdf")
+    if uploaded_file and st.button("处理文件"):
+        with st.spinner("处理中..."):
+            extractor = FastBunkerPriceExtractor(
+                uploaded_file.getvalue(),
+                "data/bunker_prices.xlsx",
+                "data/fuel_prices.xlsx"
+            )
+            if extractor.process_pdf():
+                st.success("文件处理成功！")
+                st.cache_data.clear()
+            else:
+                st.error("文件处理失败，请检查格式")
+    
+    # 加载数据
+    bunker_df = load_data("data/bunker_prices.xlsx", CORE_PORTS)
+    fuel_df = load_data("data/fuel_prices.xlsx", FUEL_TYPES)
+    
+    st.divider()
+    
+    # 港口价格对比
+    st.subheader("港口价格对比")
+    if not bunker_df.empty:
+        # 日期选择
+        dates = bunker_df['Date'].unique()
+        date1, date2 = st.select_slider(
+            "选择对比日期",
+            options=dates,
+            value=(dates[0], dates[-1] if len(dates) > 1 else dates[0]))
+        
+        # 获取数据
+        df1 = bunker_df[bunker_df['Date'] == date1]
+        df2 = bunker_df[bunker_df['Date'] == date2]
+        
+        # 创建对比表格
+        comparison = []
+        for port in CORE_PORTS:
+            price1 = df1[port].values[0] if port in df1.columns else None
+            price2 = df2[port].values[0] if port in df2.columns else None
+            
+            if price1 and price2:
+                change = (price1 - price2) / price2 * 100
+                comparison.append({
+                    "港口": port,
+                    date1: f"${price1:.2f}",
+                    date2: f"${price2:.2f}",
+                    "变化": f"{change:+.2f}%"
+                })
+        
+        if comparison:
+            st.dataframe(pd.DataFrame(comparison).set_index("港口"))
+        else:
+            st.warning("无足够数据对比")
+    else:
+        st.warning("暂无港口数据")
+    
+    st.divider()
+    
+    # 燃料价格展示
+    st.subheader("替代燃料价格")
+    if not fuel_df.empty:
+        # 只显示最新5条记录
+        st.dataframe(fuel_df.head(5).set_index("Date"))
+    else:
+        st.warning("暂无燃料数据")
+
+@st.cache_data(ttl=600)
+def load_data(path: str, columns: list) -> pd.DataFrame:
+    try:
+        gh_manager = GitHubDataManager(
+            st.secrets.github.token, 
+            st.secrets.github.repo
+        )
+        df, exists = gh_manager.read_excel(path)
+        if exists:
+            # 确保日期格式正确
+            df['Date'] = pd.to_datetime(df['Date']).dt.date
+            # 只保留需要的列
+            return df[['Date'] + [col for col in columns if col in df.columns]]
+    except:
+        pass
+    return pd.DataFrame()
+
 if __name__ == "__main__":
     main_ui()
