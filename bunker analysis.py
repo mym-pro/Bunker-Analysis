@@ -32,6 +32,15 @@ EXTRACTION_CONFIG = {
 }
 DATE_PATTERN = r"Volume\s+\d+\s+/\s+Issue\s+\d+\s+/\s+(\w+\s+\d{1,2},\s+\d{4})"
 
+# 港口名映射
+PORT_MAPPING = {
+    "MFSPD00": "Singapore",
+    "MFRDD00": "Rotterdam",
+    "MFHKD00": "Hong Kong",
+    "MFSAD00": "Santos",
+    "MFZSD00": "Zhoushan"
+}
+
 class PDFDataExtractor:
     def __init__(self, pdf_path: Path):
         self.pdf_path = pdf_path
@@ -164,7 +173,13 @@ def main_ui():
             data_df['Date'] = pd.to_datetime(data_df['Date']).dt.strftime('%Y-%m-%d')
             data_df = data_df.sort_values(by='Date', ascending=False)
             
-            # 展示内容一：选定两个日期进行比较
+            # 展示内容一：展示"MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"的最新十条数据
+            st.subheader("最新十条港口数据")
+            latest_data = data_df[["Date", "MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]].head(10)
+            latest_data_renamed = latest_data.rename(columns=PORT_MAPPING)
+            st.table(latest_data_renamed.set_index("Date"))
+
+            # 展示内容二：选定两个日期进行比较
             st.subheader("日期数据变动比较")
             date_options = data_df['Date'].unique()
             selected_dates = st.multiselect("选择两个日期进行比较", options=date_options, max_selections=2)
@@ -173,45 +188,32 @@ def main_ui():
                 data1 = data_df[data_df['Date'] == date1][["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]]
                 data2 = data_df[data_df['Date'] == date2][["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]]
                 comparison_df = pd.DataFrame({
-                    "指标": ["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"],
+                    "港口": ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"],
                     f"{date1}": data1.iloc[0].values,
                     f"{date2}": data2.iloc[0].values,
-                    "变动": data1.iloc[0].values - data2.iloc[0].values
+                    "环比变化 (%)": ((data1.iloc[0].values - data2.iloc[0].values) / data2.iloc[0].values * 100).round(2)
                 })
-                st.table(comparison_df.set_index("指标"))
+                st.table(comparison_df.set_index("港口"))
 
-            # 展示内容二：展示"MLBSO00", "LNBSF00"的最新十个日期数据
-            st.subheader("最新十个日期的MLBSO00和LNBSF00数据")
-            latest_data = data_df[["Date", "MLBSO00", "LNBSF00"]].head(10)
-            st.table(latest_data.set_index("Date"))
         except Exception as e:
             st.warning("暂无历史数据或读取失败")
 
-    # 数据导出模块（保持原样，但数据源改为GitHub）
+    # 数据导出模块
     with st.expander("📥 第三步 - 数据导出", expanded=True):
         try:
             contents = repo.get_contents(file_path)
             data_df = pd.read_excel(BytesIO(base64.b64decode(contents.content)), engine='openpyxl')
             
-            # 新增日期处理逻辑
-            data_df['Date'] = pd.to_datetime(data_df['Date'])  # 转换为datetime类型
-            data_df = data_df.sort_values('Date', ascending=False)  # 按日期降序排列
-            
-            # 生成排序后的日期选项
-            sorted_dates = data_df['Date'].dt.strftime('%Y-%m-%d').unique()
-            
-            st.subheader("按日期下载")
-            selected_date = st.selectbox("选择日期", options=sorted_dates)  # 显示排序后的日期
-            
-            daily_data = data_df[data_df['Date'] == pd.to_datetime(selected_date)]
+            # 数据按日期升序排列
+            data_df = data_df.sort_values(by='Date', ascending=True)
             
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                daily_data.to_excel(writer, index=False)
+                data_df.to_excel(writer, index=False)
             st.download_button(
-                label="下载选定日期数据",
+                label="下载完整数据",
                 data=output.getvalue(),
-                file_name=f"data_{selected_date}.xlsx",
+                file_name="complete_data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         except Exception as e:
