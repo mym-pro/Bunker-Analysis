@@ -206,14 +206,14 @@ def main_ui():
             data_df = data_df.sort_values(by='Date', ascending=False)
             
             # 展示内容一：展示"MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"的最新十条数据
-            st.subheader("最新十条港口数据")
+            st.subheader("港口油价数据")
             latest_data = data_df[["Date", "MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]].head(10)
             latest_data_renamed = latest_data.rename(columns=PORT_MAPPING)
             latest_data_renamed = latest_data_renamed.round(2)  # 保留两位小数
             st.table(latest_data_renamed.set_index("Date"))
 
             # 展示内容二：展示"MLBSO00", "LNBSF00"的最新十条数据
-            st.subheader("最新十条 MLBSO00 和 LNBSF00 数据")
+            st.subheader("替代燃料： MLBSO00(甲醇燃料) 和 LNBSF00（天然气燃料） ")
             latest_data_mlbs = data_df[["Date", "MLBSO00", "LNBSF00"]].head(10)
             latest_data_mlbs = latest_data_mlbs.sort_values(by='Date', ascending=True)
             latest_data_mlbs = latest_data_mlbs.round(3)  # 保留三位小数
@@ -224,7 +224,8 @@ def main_ui():
             date_options = data_df['Date'].unique()
             selected_dates = st.multiselect("选择两个日期进行比较", options=date_options, max_selections=2)
             if len(selected_dates) == 2:
-                date1, date2 = selected_dates
+                # 确保较新的日期在前面
+                date1, date2 = sorted(selected_dates, key=lambda x: datetime.strptime(x, '%Y-%m-%d'), reverse=True)
                 data1 = data_df[data_df['Date'] == date1][["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]]
                 data2 = data_df[data_df['Date'] == date2][["MFSPD00", "MFRDD00", "MFHKD00", "MFSAD00", "MFZSD00"]]
                 comparison_df = pd.DataFrame({
