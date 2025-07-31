@@ -179,7 +179,13 @@ def main_ui():
             latest_data_renamed = latest_data.rename(columns=PORT_MAPPING)
             st.table(latest_data_renamed.set_index("Date"))
 
-            # 展示内容二：选定两个日期进行比较
+            # 展示内容二：展示"MLBSO00", "LNBSF00"的最新十条数据
+            st.subheader("最新十条 MLBSO00 和 LNBSF00 数据")
+            latest_data_mlbs = data_df[["Date", "MLBSO00", "LNBSF00"]].head(10)
+            latest_data_mlbs = latest_data_mlbs.sort_values(by='Date', ascending=True)
+            st.table(latest_data_mlbs.set_index("Date"))
+
+            # 展示内容三：选定两个日期进行比较
             st.subheader("日期数据变动比较")
             date_options = data_df['Date'].unique()
             selected_dates = st.multiselect("选择两个日期进行比较", options=date_options, max_selections=2)
