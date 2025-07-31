@@ -129,6 +129,18 @@ def main_ui():
     st.set_page_config(page_title="PDF 数据提取器", layout="wide")
     st.title("PDF 数据提取器")
 
+    # 注入自定义CSS样式以禁用选中功能
+    st.markdown("""
+    <style>
+    .stTable td:first-child {
+        user-select: none; /* 禁用第一列的选中功能 */
+    }
+    .stTable th {
+        user-select: none; /* 禁用所有表头的选中功能 */
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     # 从Secrets获取GitHub配置
     try:
         github_token = st.secrets.github.token
@@ -197,7 +209,7 @@ def main_ui():
                     "港口": ["Singapore", "Rotterdam", "Hong Kong", "Santos", "Zhoushan"],
                     f"{date1}": data1.iloc[0].values,
                     f"{date2}": data2.iloc[0].values,
-                    "环比变化 (%)": ((data1.iloc[0].values - data2.iloc[0].values) / data2.iloc[0].values * 100).round(2)
+                    "环比变化 (%)": ((data1.iloc[0].values - data2.iloc[0].values) / data2.iloc[0].values * 100).round(0)
                 })
                 st.table(comparison_df.set_index("港口"))
 
