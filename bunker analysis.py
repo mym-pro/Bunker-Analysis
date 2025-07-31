@@ -56,9 +56,9 @@ class GitHubDataManager:
         self.repo = self.g.get_repo(self.repo_name)
 
     @st.cache_data(ttl=3600, show_spinner="从GitHub加载数据...")
-    def read_excel(self, file_path: str) -> pd.DataFrame:
+    def read_excel(_self, file_path: str) -> pd.DataFrame:
         try:
-            contents = self.repo.get_contents(file_path)
+            contents = _self.repo.get_contents(file_path)
             return pd.read_excel(BytesIO(base64.b64decode(contents.content)), engine='openpyxl')
         except Exception as e:
             logger.warning(f"GitHub读取失败: {str(e)}")
@@ -86,11 +86,13 @@ def main_ui():
     st.set_page_config(page_title="船燃价格分析系统", layout="wide")
     st.title("Mariners' Bunker Price Analysis System")
 
-    FUEL_PATH = "data/fuel_prices_new.xlsx"
-    BUNKER_PATH = "data/bunker_prices_new.xlsx"
+    FUEL_PATH = "data/fuel_prices.xlsx"
+    BUNKER_PATH = "data/bunker_prices.xlsx"
+
+    # 初始化 GitHub 数据管理器
+    gh_manager = GitHubDataManager(st.secrets.github.token, st.secrets.github.repo)
 
     # 加载数据
-    gh_manager = GitHubDataManager(st.secrets.github.token, st.secrets.github.repo)
     fuel_df = gh_manager.read_excel(FUEL_PATH)
     bunker_df = gh_manager.read_excel(BUNKER_PATH)
 
